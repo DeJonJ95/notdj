@@ -1,4 +1,5 @@
 import { bootApp } from './app.js';
+import { audio } from './engine/audio-engine.js';
 
 const PASSWORD = 'platter';
 const AUTH_KEY = 'notdj.auth';
@@ -38,8 +39,14 @@ function renderTapToStart() {
   boot.innerHTML = `
     <div class="logo">notdj</div>
     <div class="hint">tap to start audio</div>
+    <pre id="boot-log" style="margin:16px 0 0 0;color:#7a7a85;font-size:10px;letter-spacing:0.08em;text-transform:uppercase;font-family:inherit;white-space:pre-wrap;text-align:center;min-height:14em;"></pre>
   `;
   boot.addEventListener('pointerdown', start, { once: true });
+}
+
+function bootLog(line) {
+  const el = document.getElementById('boot-log');
+  if (el) el.textContent += line + '\n';
 }
 
 function showFatalError(err) {
@@ -53,6 +60,7 @@ function showFatalError(err) {
     <div style="color:#7a7a85;font-size:11px;margin-bottom:4px;">Error</div>
     <pre style="margin:0;white-space:pre-wrap;word-break:break-word;color:#ff6a1a;">${escape(stack)}</pre>
     <button onclick="location.reload()" style="margin-top:20px;background:#ff6a1a;border:none;color:#fff;padding:10px 24px;border-radius:8px;font-size:13px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;cursor:pointer;">Reload</button>
+    <button onclick="localStorage.clear();indexedDB.databases().then(d=>d.forEach(x=>indexedDB.deleteDatabase(x.name)));location.reload();" style="margin:20px 0 0 8px;background:#7a7a85;border:none;color:#fff;padding:10px 24px;border-radius:8px;font-size:13px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;cursor:pointer;">Reset + Reload</button>
   `;
   document.body.appendChild(overlay);
 }
@@ -61,17 +69,41 @@ function escape(s) {
   return String(s).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
 }
 
-async function start() {
+async function start(e) {
   try {
-    boot.remove();
+    bootLog('1. creating audio context…');
+    // CRITICAL: must construct + resume AudioContext synchronously from the gesture handler on iOS.
+    // We do it here, before any awaits, so the gesture chain stays live.
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) throw new Error('Web Audio not supported in this browser');
+    audio.ctx = new Ctx({ latencyHint: 'interactive' });
+    bootLog('   state=' + audio.ctx.state + ' sr=' + audio.ctx.sampleRate);
+
+    // Kick a silent buffer to fully unlock the context on iOS
+    const unlockBuf = audio.ctx.createBuffer(1, 1, 22050);
+    const unlockSrc = audio.ctx.createBufferSource();
+    unlockSrc.buffer = unlockBuf;
+    unlockSrc.connect(audio.ctx.destination);
+    unlockSrc.start(0);
+
+    if (audio.ctx.state === 'suspended') {
+      bootLog('2. resuming context…');
+      await audio.ctx.resume();
+      bootLog('   state=' + audio.ctx.state);
+    } else {
+      bootLog('2. context already running');
+    }
+
+    bootLog('3. booting app…');
     await bootApp(document.getElementById('app'));
+    bootLog('4. ready.');
+    boot.remove();
   } catch (err) {
     console.error('bootApp failed:', err);
     showFatalError(err);
   }
 }
 
-// Global handlers so async exceptions inside bootApp's children still surface
 window.addEventListener('error', (e) => showFatalError(e.error || e.message));
 window.addEventListener('unhandledrejection', (e) => showFatalError(e.reason));
 
