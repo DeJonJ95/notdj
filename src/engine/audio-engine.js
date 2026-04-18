@@ -22,7 +22,8 @@ class AudioEngine {
       const Ctx = window.AudioContext || window.webkitAudioContext;
       this.ctx = new Ctx({ latencyHint: 'interactive' });
     }
-    if (this.ctx.state === 'suspended') await this.ctx.resume();
+    // Non-blocking resume — iOS can hang if awaited inside a gesture handler.
+    if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
 
     this.bus = new MixerBus(this.ctx);
     this.master = this.bus.masterIn;
