@@ -25,7 +25,7 @@ export function drawDeck(ctx, rect, deckId, fullState, regionsOut, pressed, pres
   P.text(ctx, deckState.isMaster ? 'MASTER · CDJ · XDJ' : 'CDJ · XDJ', layout.head.x + layout.head.w - 4, layout.head.y + 4, { color: deckState.isMaster ? color : theme.muted, size: 10, align: 'right', weight: 500 });
 
   // track info card
-  drawTrackCard(ctx, layout, deckState, color);
+  drawTrackCard(ctx, layout, deckState, color, fullState);
   regionsOut.push({ type: 'detail', deckId, bounds: layout.detail });
 
   // overview waveform
@@ -55,10 +55,10 @@ export function drawDeck(ctx, rect, deckId, fullState, regionsOut, pressed, pres
   drawFxStrip(ctx, layout.fxStrip, deckId, deckState, color, regionsOut, pressed);
 
   // transport
-  drawTransport(ctx, layout.transport, deckId, deckState, color, regionsOut, pressed);
+  drawTransport(ctx, layout.transport, deckId, deckState, color, regionsOut, pressed, fullState);
 }
 
-function drawTrackCard(ctx, layout, state, color) {
+function drawTrackCard(ctx, layout, state, color, fullState) {
   P.panel(ctx, layout.track, { fill: '#0f0f12', border: theme.border, radius: 8 });
   const t = state.track;
   const m = layout.trackMeta;
@@ -72,6 +72,12 @@ function drawTrackCard(ctx, layout, state, color) {
     P.text(ctx, 'BPM', m.x + m.w, m.y + 32, { color, size: 9, weight: 600, align: 'right' });
   } else {
     P.text(ctx, 'drop a file to load', m.x, m.y + 18, { color: theme.muted, size: 12 });
+  }
+
+  // Smart Sync status overlay (transient)
+  const status = fullState?.ui?.smartSyncStatus;
+  if (status) {
+    P.text(ctx, status, m.x, m.y + 44, { color: theme.cyan, size: 10, weight: 600 });
   }
 
   // Detail waveform
@@ -163,12 +169,13 @@ function drawFxStrip(ctx, b, deckId, state, color, regionsOut, pressed) {
   }
 }
 
-function drawTransport(ctx, b, deckId, state, color, regionsOut, pressed) {
-  const gap = 8;
-  const w = (b.w - gap * 2) / 3;
+function drawTransport(ctx, b, deckId, state, color, regionsOut, pressed, fullState) {
+  const gap = 6;
+  const w = (b.w - gap * 3) / 4;
   const cue = { x: b.x, y: b.y, w, h: b.h };
-  const play = { x: b.x + w + gap, y: b.y, w, h: b.h };
+  const play = { x: b.x + (w + gap), y: b.y, w, h: b.h };
   const sync = { x: b.x + (w + gap) * 2, y: b.y, w, h: b.h };
+  const smart = { x: b.x + (w + gap) * 3, y: b.y, w, h: b.h };
 
   P.button(ctx, cue, { label: 'CUE', bg: theme.panel2, pressed: pressed?.type === 'cue' && pressed?.deckId === deckId });
   regionsOut.push({ type: 'cue', deckId, bounds: cue });
@@ -178,6 +185,18 @@ function drawTransport(ctx, b, deckId, state, color, regionsOut, pressed) {
 
   P.button(ctx, sync, { label: 'SYNC', active: state.syncEnabled, color, glow: state.syncEnabled, pressed: pressed?.type === 'sync' && pressed?.deckId === deckId });
   regionsOut.push({ type: 'sync', deckId, bounds: sync });
+
+  // SMART SYNC button — glows cyan when active, shows status indicator
+  const smartActive = fullState?.ui?.smartSyncActive === deckId;
+  const smartColor = smartActive ? theme.cyan : color;
+  P.button(ctx, smart, {
+    label: smartActive ? '◈ MIX' : 'SMART',
+    active: smartActive,
+    color: smartColor,
+    glow: smartActive,
+    pressed: pressed?.type === 'smartSync' && pressed?.deckId === deckId,
+  });
+  regionsOut.push({ type: 'smartSync', deckId, bounds: smart });
 }
 
 function fmtTime(sec) {
