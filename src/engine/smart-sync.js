@@ -219,10 +219,15 @@ export const smartSync = {
       if (!t.bpm || t.bpm <= 0) continue;
 
       const targetKey = parseKey(t.key);
-      const harmDist = harmonicDistance(sourceKey, targetKey);
-
-      // Hard filter: skip if harmonically incompatible
-      if (harmDist === Infinity) continue;
+      let harmDist;
+      if (!sourceKey || !targetKey) {
+        // No key data available → don't penalize, just use BPM + energy
+        harmDist = 0;
+      } else {
+        harmDist = harmonicDistance(sourceKey, targetKey);
+        // Hard filter: skip if harmonically incompatible
+        if (harmDist === Infinity) continue;
+      }
 
       // Score: lower harmonic distance is better
       const harmScore = 100 - harmDist * 30; // 100 (perfect) down to 40 (compatible)
