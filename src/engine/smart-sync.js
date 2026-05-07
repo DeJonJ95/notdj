@@ -244,7 +244,20 @@ export const smartSync = {
       // Preference for tracks that serve as energy progressions
       const energyDirection = t.bpm > sourceBpm ? 5 : 0; // slight nod to building energy
 
-      const total = harmScore * 3 + bpmScore * 2 + energyScoreVal + energyDirection;
+      // Category compatibility — acapella/instrumental awareness
+      const srcCat = sourceTrack.category || 'full';
+      const tgtCat = t.category || 'full';
+      let categoryScore = 0;
+      if (srcCat === 'acapella' && tgtCat === 'instrumental') categoryScore = 100;  // Perfect layering
+      else if (srcCat === 'instrumental' && tgtCat === 'acapella') categoryScore = 100; // Perfect layering
+      else if (srcCat === 'acapella' && tgtCat === 'full') categoryScore = 20;     // Mashup potential
+      else if (srcCat === 'full' && tgtCat === 'acapella') categoryScore = 20;     // Mashup potential
+      else if (srcCat === 'instrumental' && tgtCat === 'full') categoryScore = 10; // Ok
+      else if (srcCat === 'full' && tgtCat === 'instrumental') categoryScore = 10; // Ok
+      else if (srcCat === 'acapella' && tgtCat === 'acapella') categoryScore = -100; // Vocals clash
+      // full↔full = 0 (standard mixing, no bonus)
+
+      const total = harmScore * 3 + bpmScore * 2 + energyScoreVal + energyDirection + categoryScore;
 
       if (total > bestScore) {
         bestScore = total;
