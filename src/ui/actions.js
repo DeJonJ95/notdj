@@ -387,7 +387,7 @@ function openSamplePicker(slotIdx) {
   if (!samplePicker) {
     samplePicker = document.createElement('input');
     samplePicker.type = 'file';
-    samplePicker.accept = 'audio/*';
+    samplePicker.accept = 'audio/*,.mp3,.wav,.flac,.m4a,.aac,.ogg,.opus,.aiff,.aif';
     samplePicker.style.display = 'none';
     document.body.appendChild(samplePicker);
   }
