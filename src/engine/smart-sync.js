@@ -192,75 +192,68 @@ function getActions() {
 export const smartSync = {
 
   // Find the best compatible track from the library for the given source deck.
-  // Returns: track object or null.
+  // Returns: track object or null (only null if library is empty).
   findMatch(deckId) {
     const decks = store.get().decks;
     const sourceDeck = decks.find(d => d.id === deckId);
     const targetDeck = decks.find(d => d.id !== deckId);
 
     const sourceTrack = sourceDeck?.track;
-    if (!sourceTrack) return null; // Nothing playing on source → can't match
+    if (!sourceTrack || !sourceTrack.bpm) return null;
 
     const sourceBpm = sourceTrack.bpm;
     const sourceKey = parseKey(sourceTrack.key);
     const tracks = library.tracks;
+    if (!tracks.length) return null;
 
     // Don't recommend the currently loaded track on the other deck
     const excludeIds = new Set();
-    if (targetDeck?.track) excludeIds.add(targetDeck.track.id);
-    if (sourceTrack?.id) excludeIds.add(sourceTrack.id); // Don't pick same track
+    if (targetDeck?.track?.id) excludeIds.add(targetDeck.track.id);
+    if (sourceTrack?.id) excludeIds.add(sourceTrack.id);
 
-    // Score every candidate
+    // Score every candidate (NO hard skips beyond empty library or active deck tracks)
     let best = null;
     let bestScore = -Infinity;
 
     for (const t of tracks) {
       if (excludeIds.has(t.id)) continue;
-      if (!t.bpm || t.bpm <= 0) continue;
 
+      // ── Key / harmonic score ──────────────────────────────────────
       const targetKey = parseKey(t.key);
       let harmDist;
       if (!sourceKey || !targetKey) {
-        // No key data available → don't penalize, just use BPM + energy
-        harmDist = 0;
+        harmDist = 0; // unknown key → treat as neutral
       } else {
         harmDist = harmonicDistance(sourceKey, targetKey);
-        // Hard filter: skip if harmonically incompatible
-        if (harmDist === Infinity) continue;
       }
+      // Score 100 (perfect) down to 10 (compatible). Incompatible = still 5 not 0.
+      const harmScore = harmDist === Infinity ? 5 : 100 - harmDist * 30;
 
-      // Score: lower harmonic distance is better
-      const harmScore = 100 - harmDist * 30; // 100 (perfect) down to 40 (compatible)
-
-      // BPM compatibility: within ±5% is perfect, ±10% is ok
-      const bpmRatio = t.bpm / sourceBpm;
+      // ── BPM score (always scored, never skipped) ──────────────────
+      const bpmRatio = t.bpm ? t.bpm / sourceBpm : 1;
       let bpmScore;
       if (bpmRatio >= 0.95 && bpmRatio <= 1.05) bpmScore = 100;
       else if (bpmRatio >= 0.90 && bpmRatio <= 1.10) bpmScore = 70;
       else if (bpmRatio >= 0.85 && bpmRatio <= 1.15) bpmScore = 40;
-      else continue; // BPM too far even for sync stretching
+      else if (bpmRatio >= 0.75 && bpmRatio <= 1.25) bpmScore = 15;  // stretchable
+      else bpmScore = 5;                                               // big stretch but possible
 
-      // Energy: prefer tracks that move energy in a natural direction
-      // (subtle change is good for blending; big change is good for drops)
-      const refBpm = sourceBpm;
-      const energy = energyScore(t.bpm, refBpm);
-      const energyScoreVal = 50 - Math.abs(energy - 0.5) * 40; // peak at 0.5 ratio
+      // ── Energy ────────────────────────────────────────────────────
+      const energy = energyScore(t.bpm || sourceBpm, sourceBpm);
+      const energyScoreVal = 50 - Math.abs(energy - 0.5) * 40;
+      const energyDirection = (t.bpm || sourceBpm) > sourceBpm ? 5 : 0;
 
-      // Preference for tracks that serve as energy progressions
-      const energyDirection = t.bpm > sourceBpm ? 5 : 0; // slight nod to building energy
-
-      // Category compatibility — acapella/instrumental awareness
+      // ── Category compatibility ────────────────────────────────────
       const srcCat = sourceTrack.category || 'full';
       const tgtCat = t.category || 'full';
       let categoryScore = 0;
-      if (srcCat === 'acapella' && tgtCat === 'instrumental') categoryScore = 100;  // Perfect layering
-      else if (srcCat === 'instrumental' && tgtCat === 'acapella') categoryScore = 100; // Perfect layering
-      else if (srcCat === 'acapella' && tgtCat === 'full') categoryScore = 20;     // Mashup potential
-      else if (srcCat === 'full' && tgtCat === 'acapella') categoryScore = 20;     // Mashup potential
-      else if (srcCat === 'instrumental' && tgtCat === 'full') categoryScore = 10; // Ok
-      else if (srcCat === 'full' && tgtCat === 'instrumental') categoryScore = 10; // Ok
-      else if (srcCat === 'acapella' && tgtCat === 'acapella') categoryScore = -100; // Vocals clash
-      // full↔full = 0 (standard mixing, no bonus)
+      if (srcCat === 'acapella' && tgtCat === 'instrumental') categoryScore = 100;
+      else if (srcCat === 'instrumental' && tgtCat === 'acapella') categoryScore = 100;
+      else if (srcCat === 'acapella' && tgtCat === 'full') categoryScore = 20;
+      else if (srcCat === 'full' && tgtCat === 'acapella') categoryScore = 20;
+      else if (srcCat === 'instrumental' && tgtCat === 'full') categoryScore = 10;
+      else if (srcCat === 'full' && tgtCat === 'instrumental') categoryScore = 10;
+      else if (srcCat === 'acapella' && tgtCat === 'acapella') categoryScore = -100;
 
       const total = harmScore * 3 + bpmScore * 2 + energyScoreVal + energyDirection + categoryScore;
 
@@ -290,8 +283,18 @@ export const smartSync = {
     // Step 1: Find the best matching track
     const match = this.findMatch(deckId);
     if (!match) {
-      store.set('ui', { smartSyncStatus: 'No compatible track found' });
-      setTimeout(() => store.set('ui', { smartSyncStatus: null }), 2500);
+      const count = library.tracks.length;
+      const otherDeckTrack = store.get().decks.find(d => d.id !== deckId)?.track;
+      let msg;
+      if (count === 0) {
+        msg = 'Library empty — import tracks first';
+      } else if (otherDeckTrack && count <= 2) {
+        msg = `Only "${otherDeckTrack.title}" on other deck — nothing else to load`;
+      } else {
+        msg = `No match found in ${count} tracks`;
+      }
+      store.set('ui', { smartSyncStatus: msg });
+      setTimeout(() => store.set('ui', { smartSyncStatus: null }), 3000);
       return;
     }
 
