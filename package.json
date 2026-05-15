@@ -1,0 +1,19 @@
+{
+  "name": "notdj",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "description": "Touch-first DJ controller PWA for iPad Pro — Pioneer CDJ-3000 + DJM-A9 inspired",
+  "scripts": {
+    "dev": "vite --host",
+    "build": "vite build",
+    "preview": "vite preview --host"
+  },
+  "devDependencies": {
+    "vite": "^5.4.10",
+    "vite-plugin-pwa": "^0.20.5"
+  },
+  "dependencies": {
+    "jsmediatags": "^3.9.7"
+  }
+}

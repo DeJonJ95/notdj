@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="notdj" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="theme-color" content="#0d0d10" />
+    <link rel="apple-touch-icon" href="/icon.svg" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <title>notdj</title>
+    <style>
+      :root {
+        --bg: #0d0d10;
+        --panel: #15151a;
+        --panel-2: #1c1c22;
+        --border: #26262e;
+        --text: #e8e8ec;
+        --muted: #7a7a85;
+        --deck-a: #ff6a1a;
+        --deck-b: #ff3d5a;
+        --green: #4ade80;
+        --amber: #fbbf24;
+        --red: #ef4444;
+        --sat: env(safe-area-inset-top);
+        --sab: env(safe-area-inset-bottom);
+        --sal: env(safe-area-inset-left);
+        --sar: env(safe-area-inset-right);
+      }
+      *, *::before, *::after { box-sizing: border-box; }
+      html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; overscroll-behavior: none; }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font-family: -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif;
+        font-size: 13px;
+        -webkit-user-select: none;
+        user-select: none;
+        -webkit-touch-callout: none;
+        touch-action: none;
+      }
+      #app {
+        position: fixed;
+        inset: 0;
+        padding-top: var(--sat);
+        padding-bottom: var(--sab);
+        padding-left: var(--sal);
+        padding-right: var(--sar);
+      }
+      #boot {
+        position: absolute;
+        inset: 0;
+        display: grid;
+        place-items: center;
+        gap: 16px;
+        font-family: 'SF Pro Display', system-ui, sans-serif;
+        letter-spacing: 0.08em;
+      }
+      #boot .logo {
+        font-size: 24px;
+        font-weight: 700;
+        color: var(--deck-a);
+      }
+      #boot .hint {
+        color: var(--muted);
+        font-size: 12px;
+        text-transform: uppercase;
+      }
+      button { font: inherit; color: inherit; }
+      canvas { display: block; touch-action: none; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <div id="boot">
+        <div class="logo">notdj</div>
+        <div class="hint">tap to start audio</div>
+      </div>
+    </div>
+    <script type="module" src="/src/main.js"></script>
+  </body>
+</html>
