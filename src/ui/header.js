@@ -33,6 +33,13 @@ export function drawHeader(ctx, b, state, regionsOut) {
   const settings = { x: right - btnH, y: b.y + (b.h - btnH) / 2, w: btnH, h: btnH };
   const rec = { x: settings.x - btnW - gap, y: settings.y, w: btnW, h: btnH };
   const lib = { x: rec.x - btnW - gap, y: settings.y, w: btnW, h: btnH };
+  const intentW = 96;
+  const intent = { x: lib.x - intentW - gap, y: settings.y, w: intentW, h: btnH };
+
+  const setIntent = state.ui?.setIntent || 'sustain';
+  const intentColor = setIntent === 'build' ? theme.green : setIntent === 'cooldown' ? theme.cyan : theme.amber;
+  P.button(ctx, intent, { label: setIntent.toUpperCase(), color: intentColor, bg: theme.panel2 });
+  regionsOut.push({ type: 'setIntentCycle', bounds: intent });
 
   P.button(ctx, lib, { label: 'LIBRARY', bg: theme.panel2 });
   regionsOut.push({ type: 'libraryToggle', bounds: lib });

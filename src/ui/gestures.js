@@ -185,5 +185,6 @@ export class GestureEngine {
     libraryToggle: { start: () => this.actions.toggleLibrary(), move: () => {} },
     recordToggle: { start: () => this.actions.toggleRecord(), move: () => {} },
     settingsToggle: { start: () => this.actions.toggleSettings(), move: () => {} },
+    setIntentCycle: { start: () => this.actions.cycleSetIntent(), move: () => {} },
   };
 }

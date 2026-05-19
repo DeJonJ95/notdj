@@ -344,6 +344,19 @@ export const actions = {
       hotCues: new Array(8).fill(null),
       loop: null,
     });
+
+    // Push to mix history. Cap at 20.
+    const history = store.get().ui.mixHistory || [];
+    const trimmed = [{ trackId: track.id, artist: track.artist, loadedAt: Date.now() }, ...history].slice(0, 20);
+    store.set('ui', { mixHistory: trimmed });
+  },
+
+  // Set intent — cycles build → sustain → cooldown.
+  cycleSetIntent() {
+    const order = ['build', 'sustain', 'cooldown'];
+    const cur = store.get().ui.setIntent || 'sustain';
+    const next = order[(order.indexOf(cur) + 1) % order.length];
+    store.set('ui', { setIntent: next });
   },
 };
 
