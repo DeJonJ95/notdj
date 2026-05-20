@@ -6,3 +6,7 @@ dist-ssr
 *.local
 .DS_Store
 .vite
+
+# stray files — keep this repo focused on the DJ controller
+*.zip
+proportfolio-showcase/
