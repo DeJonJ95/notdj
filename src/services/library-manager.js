@@ -65,7 +65,7 @@ class LibraryManager {
     // Mono mixdown for analysis (saves transfer + work)
     const mono = mixdown(decoded);
     const analysis = await this._analyze(mono, decoded.sampleRate, decoded.duration);
-    const { peaks, bandedPeaks, bpm, energy, firstBeatSec, introEndSec, outroStartSec, firstVocalSec } = analysis;
+    const { peaks, bandedPeaks, bpm, energy, firstBeatSec, introEndSec, outroStartSec, firstVocalSec, firstDropSec } = analysis;
     onProgress?.(0.9);
 
     // Detect track category from title: acapella, instrumental, or full
@@ -86,6 +86,7 @@ class LibraryManager {
       introEndSec: introEndSec ?? 0,     // where the intro pad ends and the body begins
       outroStartSec: outroStartSec ?? decoded.duration,  // where outro/tail starts
       firstVocalSec: firstVocalSec ?? 0, // first significant high-band content (for mashups)
+      firstDropSec: firstDropSec ?? 0,   // first sustained high-energy plateau (the drop)
       durationSec: decoded.duration,
       sampleRate: decoded.sampleRate,
       channels: decoded.numberOfChannels,

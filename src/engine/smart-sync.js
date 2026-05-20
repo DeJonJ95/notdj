@@ -437,6 +437,24 @@ export const smartSync = {
         incomingStart = mashupStart;
         incomingEntryLabel = 'vocal';
       }
+    } else {
+      // ── Drop-at-midpoint positioning ──────────────────────────────────
+      // If the incoming has a detectable drop, position so it lands at the
+      // crossfader midpoint — the drop arrives exactly as both decks blend 50/50.
+      const drop = matchOnLib.firstDropSec || 0;
+      const introEnd = matchOnLib.introEndSec || matchOnLib.firstBeatSec || 0;
+      if (drop > introEnd + 4) {
+        const dropArrivalTimeSec = crossfadeDuration / 2 / 1000;
+        const candidate = drop - dropArrivalTimeSec;
+        if (candidate >= introEnd) {
+          if (Math.abs(candidate - incomingStart) > 1) {
+            incomingDp.seek(candidate);
+            store.setIn('decks', tIdx, { positionSec: candidate });
+          }
+          incomingStart = candidate;
+          incomingEntryLabel = 'drop@mid';
+        }
+      }
     }
 
     // ── Hot cues on incoming for manual recall ────────────────────────────
@@ -461,9 +479,19 @@ export const smartSync = {
 
     const phraseTimer = setTimeout(() => {
       // Apply source loop if needed to keep source body looping during the mix
+      let loopReleaseTimer = null;
       if (sourceLoopApplied) {
         audio.deck(deckId).setLoop({ startSec: sourceLoopApplied.startSec, endSec: sourceLoopApplied.endSec });
         store.setIn('decks', sIdx, { loop: { ...sourceLoopApplied, active: true } });
+
+        // Schedule loop release ~4 bars before mix-end so source plays naturally into the final fade.
+        // This lets the outgoing track's natural tail be heard rather than a mid-loop seam.
+        const fourBarsMs = (4 * 4 * 60 / bpm) * 1000;
+        const releaseAtMs = Math.max(100, crossfadeDuration - fourBarsMs);
+        loopReleaseTimer = setTimeout(() => {
+          audio.deck(deckId).setLoop(null);
+          store.setIn('decks', sIdx, { loop: null });
+        }, releaseAtMs);
       }
 
       // Pre-kill incoming bass before its first beat plays
@@ -472,7 +500,7 @@ export const smartSync = {
       audio.deck(targetId).play();
       store.setIn('decks', tIdx, { isPlaying: true });
 
-      const loopMsg = sourceLoopApplied ? ` · src looped ${sourceLoopApplied.bars}b` : '';
+      const loopMsg = sourceLoopApplied ? ` · src looped ${sourceLoopApplied.bars}b → release` : '';
       store.set('ui', {
         smartSyncStatus: `Mixing · ${bars} bars · bass swap${loopMsg}`,
       });
@@ -493,6 +521,7 @@ export const smartSync = {
         sIdx, tIdx,
         sourceLowSnapshot, targetLowSnapshot,
         finishTimeout: null,
+        loopReleaseTimer,
         sourceId: deckId,
       };
 
@@ -531,6 +560,7 @@ export const smartSync = {
     for (const c of activeMix.cancels || []) { try { c(); } catch {} }
     if (activeMix.finishTimeout) clearTimeout(activeMix.finishTimeout);
     if (activeMix.phraseTimer) clearTimeout(activeMix.phraseTimer);
+    if (activeMix.loopReleaseTimer) clearTimeout(activeMix.loopReleaseTimer);
     // Clear source loop if it was applied
     if (activeMix.sourceId) {
       audio.deck(activeMix.sourceId).setLoop(null);
