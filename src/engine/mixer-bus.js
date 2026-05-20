@@ -12,7 +12,8 @@ import { crossfadeGains, dbToGain, clamp } from '../utils/math.js';
 export class MixerBus {
   constructor(ctx) {
     this.ctx = ctx;
-    this.channels = [this._buildChannel(), this._buildChannel()];
+    // Channel 0 (deck A) defaults to L, channel 1 (deck B) to R, matching state.
+    this.channels = [this._buildChannel(0), this._buildChannel(1)];
 
     this.xfL = ctx.createGain(); this.xfL.gain.value = 1;
     this.xfR = ctx.createGain(); this.xfR.gain.value = 1;
@@ -48,7 +49,7 @@ export class MixerBus {
     this.setCrossfader(0);
   }
 
-  _buildChannel() {
+  _buildChannel(deckIdx = 0) {
     const ctx = this.ctx;
     const input = ctx.createGain();      // trim
     input.gain.value = 1;
@@ -74,7 +75,9 @@ export class MixerBus {
 
     const assignL = ctx.createGain();
     const assignR = ctx.createGain();
-    assignL.gain.value = 1; assignR.gain.value = 0; // default: A->L, B->R set externally
+    // Default per-deck routing: A → L, B → R (matches initial mixer state).
+    if (deckIdx === 0) { assignL.gain.value = 1; assignR.gain.value = 0; }
+    else               { assignL.gain.value = 0; assignR.gain.value = 1; }
 
     const analyser = ctx.createAnalyser();
     analyser.fftSize = 512; analyser.smoothingTimeConstant = 0.6;
