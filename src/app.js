@@ -102,7 +102,7 @@ export async function bootApp(root) {
 
   // Hidden file input triggered by double-tap on header center
   const picker = document.createElement('input');
-  picker.type = 'file'; picker.accept = 'audio/*'; picker.multiple = true; picker.style.display = 'none';
+  picker.type = 'file'; picker.accept = 'audio/*,.mp3,.wav,.flac,.m4a,.aac,.ogg,.opus,.aiff,.aif'; picker.multiple = true; picker.style.display = 'none';
   document.body.appendChild(picker);
   picker.addEventListener('change', async () => {
     const files = [...picker.files];
