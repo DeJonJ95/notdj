@@ -360,22 +360,14 @@ export const smartSync = {
     const incomingDp = audio.deck(targetId);
     const matchOnLib = library.tracks.find(t => t.id === matchTrack.id) || matchTrack;
     let incomingStart = Math.max(0, matchOnLib.introEndSec || matchOnLib.firstBeatSec || 0);
+    let incomingEntryLabel = 'body';
 
-    // Mashup: if loading an acapella over a full/instrumental track, align the
-    // acapella's first vocal entry with the source's outro start (= where the
-    // instrumental body opens up). Same for instrumental loaded under an acapella.
     const srcCat = sourceDeck.track.category || 'full';
     const tgtCat = matchTrack.category || 'full';
     const isMashup = (srcCat === 'acapella' && (tgtCat === 'instrumental' || tgtCat === 'full')) ||
                      ((srcCat === 'instrumental' || srcCat === 'full') && tgtCat === 'acapella');
-    if (isMashup) {
-      const sourceOutroStart = sourceLibTrack?.outroStartSec ?? sourceDeck.track.durationSec;
-      const sourcePosNow = audio.deck(deckId).positionSec;
-      const secondsUntilOutro = Math.max(0, sourceOutroStart - sourcePosNow);
-      // Place incoming so its firstVocal lands on source outro (or current spot if past)
-      const vocalAnchor = matchOnLib.firstVocalSec || matchOnLib.introEndSec || 0;
-      incomingStart = Math.max(0, vocalAnchor - secondsUntilOutro);
-    }
+    // Mashup positioning is computed AFTER we know the mix start time (deferred below).
+
     if (incomingStart > 0 && incomingStart < incomingDp.durationSec - 30) {
       incomingDp.seek(incomingStart);
       store.setIn('decks', tIdx, { positionSec: incomingStart });
@@ -392,61 +384,97 @@ export const smartSync = {
 
     const sIdx = deckId === 'A' ? 0 : 1;
     const bpm = sourceDeck.track?.bpm || 120;
+    const beatSec = 60 / bpm;
+    const phraseSec = 16 * beatSec;
 
     // ── Dynamic mix duration based on compatibility ──────────────────────
     const compat = (harmScore + bpmScore + energyScore) / 300;
     let bars = Math.max(4, Math.min(16, Math.round(4 + 12 * compat)));
-
-    // Cap by source remaining time (need 5s buffer)
     const sourceLibTrack2 = library.tracks.find(t => t.id === sourceDeck.track.id);
     const sourceOutroStart = sourceLibTrack2?.outroStartSec ?? sourceDeck.track.durationSec;
-    const remainingSec = sourceDeck.track.durationSec - audio.deck(deckId).positionSec;
-    const maxBarsByRemaining = Math.floor(((remainingSec - 5) * bpm) / (60 * 4));
-    if (maxBarsByRemaining > 0 && maxBarsByRemaining < bars) bars = Math.max(2, maxBarsByRemaining);
+
+    // ── "Mix now" timing — next phrase boundary from current source position ─
+    const sourcePosNow = audio.deck(deckId).positionSec;
+    const beatsElapsed = (sourcePosNow * bpm) / 60;
+    const beatsIntoPhrase = beatsElapsed % 16;
+    const secUntilMix = (16 - beatsIntoPhrase) * beatSec;
+    const phraseDelayMs = Math.max(50, secUntilMix * 1000);
+    const mixStartInSource = sourcePosNow + secUntilMix;
+
+    // ── Source loop extension ─────────────────────────────────────────────
+    // If the mix would run past the source's body section, set a 4-bar beat
+    // loop on source so the body keeps repeating until the mix completes.
+    let sourceLoopApplied = null;
+    const crossfadeDurationNoLoop = (bars * 4 * 60 / bpm) * 1000;
+    const mixEndInSource = mixStartInSource + crossfadeDurationNoLoop / 1000;
+    const bodyHeadroom = sourceOutroStart - mixEndInSource;
+
+    if (bodyHeadroom < 0 && sourcePosNow < sourceOutroStart - phraseSec) {
+      // Source body would run out mid-mix. Loop a 4-bar section right at the mix start.
+      const loopBars = 4;
+      const loopLength = loopBars * 4 * beatSec;
+      const loopStart = mixStartInSource;
+      const loopEnd = Math.min(loopStart + loopLength, sourceOutroStart);
+      if (loopEnd - loopStart >= 2 * beatSec) {
+        sourceLoopApplied = { startSec: loopStart, endSec: loopEnd, bars: loopBars };
+      } else {
+        // Not enough body left to loop — shrink mix duration instead
+        const safeBars = Math.max(2, Math.floor((sourceOutroStart - mixStartInSource - 2) / (4 * beatSec)));
+        bars = Math.min(bars, safeBars);
+      }
+    }
 
     const crossfadeDuration = (bars * 4 * 60 / bpm) * 1000;
 
-    // ── Outro-aware timing ────────────────────────────────────────────────
-    // Ideally mix should END right around source outroStartSec — so it BEGINS at
-    // (outroStartSec - crossfadeDuration), snapped to the next phrase boundary.
-    const beatSec = 60 / bpm;
-    const phraseSec = 16 * beatSec;
-    const targetMixStartSec = Math.max(0, sourceOutroStart - crossfadeDuration / 1000);
-    const sourcePosNow = audio.deck(deckId).positionSec;
-
-    let secUntilMix;
-    if (sourcePosNow >= targetMixStartSec - phraseSec) {
-      // Already at or near the outro — mix on next phrase boundary
-      const beatsElapsed = (sourcePosNow * bpm) / 60;
-      const beatsIntoPhrase = beatsElapsed % 16;
-      secUntilMix = (16 - beatsIntoPhrase) * beatSec;
-    } else {
-      // Wait until source reaches targetMixStartSec, snapped to phrase
-      const targetBeats = (targetMixStartSec * bpm) / 60;
-      const snappedBeats = Math.round(targetBeats / 16) * 16;
-      const snappedTime = (snappedBeats * 60) / bpm;
-      secUntilMix = Math.max(0.05, snappedTime - sourcePosNow);
+    // ── Mashup positioning (now that we know mixStartInSource) ───────────
+    if (isMashup) {
+      const sourceMixStartToOutro = Math.max(0, sourceOutroStart - mixStartInSource);
+      const vocalAnchor = matchOnLib.firstVocalSec || matchOnLib.introEndSec || 0;
+      const mashupStart = Math.max(0, vocalAnchor - sourceMixStartToOutro);
+      if (mashupStart < incomingDp.durationSec - 30 && Math.abs(mashupStart - incomingStart) > 1) {
+        incomingDp.seek(mashupStart);
+        store.setIn('decks', tIdx, { positionSec: mashupStart });
+        incomingStart = mashupStart;
+        incomingEntryLabel = 'vocal';
+      }
     }
-    const phraseDelayMs = Math.max(50, secUntilMix * 1000);
 
-    const eta = secUntilMix > 8
-      ? `in ${Math.round(secUntilMix)}s`
-      : `next phrase`;
-    store.set('ui', { smartSyncStatus: `${reasonText} · mix ${eta}` });
+    // ── Hot cues on incoming for manual recall ────────────────────────────
+    const incomingHotCues = new Array(8).fill(null);
+    const incomingColor = targetId === 'A' ? '#ff6a1a' : '#ff3d5a';
+    incomingHotCues[0] = { positionSec: incomingStart, color: incomingColor, label: incomingEntryLabel };
+    const incomingOutroStart = matchOnLib.outroStartSec;
+    if (incomingOutroStart && incomingOutroStart > incomingStart + 30 && incomingOutroStart < incomingDp.durationSec) {
+      incomingHotCues[1] = { positionSec: incomingOutroStart, color: incomingColor, label: 'outro' };
+    }
+    store.setIn('decks', tIdx, { hotCues: incomingHotCues });
+
+    // ── Status text ───────────────────────────────────────────────────────
+    const etaTxt = secUntilMix > 6 ? `in ${Math.round(secUntilMix)}s` : `next phrase`;
+    const loopTxt = sourceLoopApplied ? ` · src loop ${sourceLoopApplied.bars}b` : '';
+    const barsTxt = ` · ${bars}b mix`;
+    store.set('ui', { smartSyncStatus: `${reasonText}${barsTxt}${loopTxt} · ${etaTxt}` });
 
     // ── Snapshot EQ so we can restore + drive the bass swap ──────────────
     const sourceLowSnapshot = store.get().mixer.channels[sIdx].eq.low;
     const targetLowSnapshot = store.get().mixer.channels[tIdx].eq.low;
 
     const phraseTimer = setTimeout(() => {
+      // Apply source loop if needed to keep source body looping during the mix
+      if (sourceLoopApplied) {
+        audio.deck(deckId).setLoop({ startSec: sourceLoopApplied.startSec, endSec: sourceLoopApplied.endSec });
+        store.setIn('decks', sIdx, { loop: { ...sourceLoopApplied, active: true } });
+      }
+
       // Pre-kill incoming bass before its first beat plays
       restoreEqLow(tIdx, -1);
 
       audio.deck(targetId).play();
       store.setIn('decks', tIdx, { isPlaying: true });
 
+      const loopMsg = sourceLoopApplied ? ` · src looped ${sourceLoopApplied.bars}b` : '';
       store.set('ui', {
-        smartSyncStatus: `Mixing · ${bars} bars · bass swap`,
+        smartSyncStatus: `Mixing · ${bars} bars · bass swap${loopMsg}`,
       });
 
       // First half: ramp incoming low up to its snapshot value
@@ -469,6 +497,11 @@ export const smartSync = {
       };
 
       activeMix.finishTimeout = setTimeout(() => {
+        // Clear source loop if we had one
+        if (sourceLoopApplied) {
+          audio.deck(deckId).setLoop(null);
+          store.setIn('decks', sIdx, { loop: null });
+        }
         audio.deck(deckId).pause();
         store.setIn('decks', sIdx, { isPlaying: false });
         // Restore source EQ for next time the deck is played
@@ -489,7 +522,7 @@ export const smartSync = {
     };
   },
 
-  // Cancel an in-progress auto-mix. Restores EQ snapshots.
+  // Cancel an in-progress auto-mix. Restores EQ snapshots + clears any source loop.
   cancel() {
     if (!activeMix) {
       store.set('ui', { smartSyncActive: null, smartSyncStatus: null });
@@ -498,6 +531,11 @@ export const smartSync = {
     for (const c of activeMix.cancels || []) { try { c(); } catch {} }
     if (activeMix.finishTimeout) clearTimeout(activeMix.finishTimeout);
     if (activeMix.phraseTimer) clearTimeout(activeMix.phraseTimer);
+    // Clear source loop if it was applied
+    if (activeMix.sourceId) {
+      audio.deck(activeMix.sourceId).setLoop(null);
+      store.setIn('decks', activeMix.sIdx, { loop: null });
+    }
     // Restore EQ values
     restoreEqLow(activeMix.sIdx, activeMix.sourceLowSnapshot);
     restoreEqLow(activeMix.tIdx, activeMix.targetLowSnapshot);
