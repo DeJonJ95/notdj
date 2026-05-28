@@ -584,30 +584,33 @@ export const smartSync = {
     // Echo throw: rare — only when intent is BUILD and mix is long.
     const useEchoThrow = bars >= 12 && technique !== 'quick-cut' && setIntent === 'build';
 
-    // ── Groove hold loop — AUDIBLE 4-bar loop on source during the FIRST HALF ─
-    // The old "loop trim at end" was inaudible because source was already faded.
-    // This version applies the loop at mix START when source is full volume,
-    // creating a "holding pattern" feel while incoming builds. Releases as the
-    // bass swap kicks in.
+    // ── Groove hold loop — AUDIBLE during the FIRST HALF of mix ────────
+    // 2 bars by default so the wrap is short enough to actually HEAR (4-bar
+    // wraps land on phrase boundaries and sound like natural music).
+    // For mixes ≥ 10 bars, schedule a 1-bar trim just before midpoint for a
+    // mild "stutter into the bass swap" build-up.
     const useGrooveLoop = bars >= 6 && !isMashup && technique !== 'quick-cut';
     let grooveLoop = null;
+    let useGrooveTrim = false;
     if (useGrooveLoop) {
       const beatSecLocal = 60 / bpm;
       const grooveStart = mixStartInSource;
       const availableSec = sourceOutroStart - grooveStart;
-      const grooveBars = availableSec >= 16 * beatSecLocal ? 4 : (availableSec >= 8 * beatSecLocal ? 2 : 0);
+      // Want at least 8 bars of body for a clean 2-bar loop with room to play out
+      const grooveBars = availableSec >= 8 * beatSecLocal ? 2 : 0;
       if (grooveBars >= 2) {
         grooveLoop = {
           startSec: grooveStart,
           endSec: grooveStart + grooveBars * 4 * beatSecLocal,
           bars: grooveBars,
         };
+        useGrooveTrim = bars >= 10;
       }
     }
 
     // ── Status text ───────────────────────────────────────────────────────
     const etaTxt = secUntilMix > 6 ? `in ${Math.round(secUntilMix)}s` : `next phrase`;
-    const loopTxt = grooveLoop ? ` · ${grooveLoop.bars}b loop` : '';
+    const loopTxt = grooveLoop ? ` · ${grooveLoop.bars}b loop${useGrooveTrim ? '→1b' : ''}` : '';
     const addonTxt = (useMidKill ? ' · mid kill' : '') +
                      (useEchoThrow ? ' · echo throw' : '');
     const techTxt = ` · ${technique.replace('-', ' ')}`;
@@ -623,19 +626,33 @@ export const smartSync = {
     const beatFxSnapshot = { ...store.get().mixer.beatFx };
 
     const phraseTimer = setTimeout(() => {
-      // ── Groove loop: AUDIBLE 4-bar source loop, applied at mix start,
-      //    released at ~75% so source plays naturally into the final fade.
+      // ── Groove loop: AUDIBLE source loop applied at mix start.
+      //    Released at midpoint so source plays naturally during the bass swap.
       let loopReleaseTimer = null;
+      let loopTrimTimer = null;
       if (grooveLoop) {
         audio.deck(deckId).setLoop({ startSec: grooveLoop.startSec, endSec: grooveLoop.endSec });
         store.setIn('decks', sIdx, { loop: { ...grooveLoop, active: true } });
 
-        const fourBarsMs = (4 * 4 * 60 / bpm) * 1000;
-        const releaseAtMs = Math.max(crossfadeDuration / 2, crossfadeDuration - fourBarsMs);
+        const oneBarSec = 4 * 60 / bpm;
+        const midpointMs = crossfadeDuration / 2;
+
+        // Optional 1-bar trim a couple bars before midpoint — audible stutter build
+        if (useGrooveTrim) {
+          const trimAtMs = Math.max(0, midpointMs - 2 * oneBarSec * 1000);
+          loopTrimTimer = setTimeout(() => {
+            const dp = audio.deck(deckId);
+            const trimEnd = grooveLoop.startSec + oneBarSec;
+            dp.setLoop({ startSec: grooveLoop.startSec, endSec: trimEnd });
+            store.setIn('decks', sIdx, { loop: { startSec: grooveLoop.startSec, endSec: trimEnd, active: true, bars: 1 } });
+          }, trimAtMs);
+        }
+
+        // Release at midpoint
         loopReleaseTimer = setTimeout(() => {
           audio.deck(deckId).setLoop(null);
           store.setIn('decks', sIdx, { loop: null });
-        }, releaseAtMs);
+        }, midpointMs);
       }
 
       // Tuning constants — chosen so transitions are clear but not jarring.
@@ -727,6 +744,7 @@ export const smartSync = {
         echoOnTimer, echoOffTimer,
         finishTimeout: null,
         loopReleaseTimer,
+        loopTrimTimer,
         sourceId: deckId,
         technique,
         useMidKill, useEchoThrow, useGrooveLoop,
@@ -772,6 +790,7 @@ export const smartSync = {
     if (activeMix.loopReleaseTimer) clearTimeout(activeMix.loopReleaseTimer);
     if (activeMix.echoOnTimer) clearTimeout(activeMix.echoOnTimer);
     if (activeMix.echoOffTimer) clearTimeout(activeMix.echoOffTimer);
+    if (activeMix.loopTrimTimer) clearTimeout(activeMix.loopTrimTimer);
     // If echo throw was already fired, fully restore beat FX now
     if (activeMix.beatFxSnapshot) {
       audio.fx.setOn(false);
