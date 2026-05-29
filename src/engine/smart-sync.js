@@ -967,6 +967,182 @@ export const smartSync = {
     };
   },
 
+  // ── MASHUP MODE: explicit acapella/instrumental layering ──────────────
+  //
+  // Tapping MASH on a deck finds a complementary track (acapella ↔ instrumental/full),
+  // loads it to the other deck, loops the beat-providing track, and layers the other
+  // on top. No bass-swap, no crossfader — the bed track plays through uninterrupted.
+  async executeMashup(deckId) {
+    if (store.get().ui.mashupActive) {
+      this.cancel();
+      return;
+    }
+
+    const decks = store.get().decks;
+    const sourceDeck = decks.find(d => d.id === deckId);
+    const targetId = deckId === 'A' ? 'B' : 'A';
+    const sourceTrack = sourceDeck?.track;
+
+    if (!sourceTrack || !sourceTrack.bpm) {
+      store.set('ui', { smartSyncStatus: 'No track on this deck' });
+      setTimeout(() => store.set('ui', { smartSyncStatus: null }), 2500);
+      return;
+    }
+
+    // Find complementary match — bias toward opposite category
+    const srcCat = sourceTrack.category || 'full';
+    const candidates = this.findCandidates(deckId, 5);
+    const complementary = candidates.filter(c => {
+      const tgtCat = c.track.category || 'full';
+      if (srcCat === 'acapella') return tgtCat === 'instrumental' || tgtCat === 'full';
+      if (srcCat === 'instrumental') return tgtCat === 'acapella' || tgtCat === 'full';
+      // full source → prefer acapella or instrumental (anything complementary)
+      return tgtCat === 'acapella' || tgtCat === 'instrumental';
+    });
+
+    const match = complementary.length > 0 ? complementary[0] : candidates[0];
+    if (!match) {
+      const count = library.tracks.length;
+      store.set('ui', { smartSyncStatus: count ? 'No complementary track found' : 'Library empty' });
+      setTimeout(() => store.set('ui', { smartSyncStatus: null }), 2500);
+      return;
+    }
+
+    const matchTrack = match.track;
+    const tgtCat = matchTrack.category || 'full';
+    const reasonText = match.reasons?.slice(0, 2).join(' · ') || '';
+
+    // Mark mashup active
+    store.set('ui', { mashupActive: targetId, smartSyncStatus: `Mashup → ${matchTrack.title} · ${reasonText}` });
+
+    // Load + sync
+    const { actions } = await import('../ui/actions.js');
+    await actions.loadFromLibrary(targetId, matchTrack);
+    const tIdx = targetId === 'A' ? 0 : 1;
+    store.setIn('decks', tIdx, { syncEnabled: true });
+    sync.setMaster(deckId);
+
+    // Position incoming — skip intro, seek to vocal/body
+    const incomingDp = audio.deck(targetId);
+    const matchOnLib = library.tracks.find(t => t.id === matchTrack.id) || matchTrack;
+    const incomingStart = Math.max(0, matchOnLib.introEndSec || matchOnLib.firstBeatSec || 0);
+    if (incomingStart > 0 && incomingStart < incomingDp.durationSec - 30) {
+      incomingDp.seek(incomingStart);
+      store.setIn('decks', tIdx, { positionSec: incomingStart });
+    }
+    sync.align(targetId);
+
+    // Determine bed (beat provider) vs layer (overlay)
+    const sIdx = deckId === 'A' ? 0 : 1;
+    const srcIsAcapella = srcCat === 'acapella';
+    const bedIdx = srcIsAcapella ? tIdx : sIdx;
+    const layerIdx = srcIsAcapella ? sIdx : tIdx;
+    const bedDeckId = srcIsAcapella ? targetId : deckId;
+    const layerDeckId = srcIsAcapella ? deckId : targetId;
+
+    const sourcePlaying = sourceDeck?.isPlaying;
+    if (!sourcePlaying) {
+      store.set('ui', { mashupActive: null, smartSyncStatus: `Loaded to Deck ${targetId} — press play` });
+      setTimeout(() => store.set('ui', { smartSyncStatus: null }), 2500);
+      return;
+    }
+
+    const sourceTempoNow = audio.deck(deckId).tempo || 1;
+    const bpm = (sourceTrack.bpm || 120) * sourceTempoNow;
+    const fourBarMs = (4 * 4 * 60 / bpm) * 1000;
+
+    // Short phrase wait (2 bars for tighter feel)
+    const beatSec = 60 / bpm;
+    const sourcePosNow = audio.deck(deckId).positionSec;
+    const beatsElapsed = (sourcePosNow * bpm) / 60;
+    const beatsIntoPhrase = beatsElapsed % 8; // 2-bar phrase boundary
+    const secUntilStart = (8 - beatsIntoPhrase) * beatSec;
+    const delayMs = Math.max(50, secUntilStart * 1000);
+
+    store.set('ui', { smartSyncStatus: `Mashup in ${Math.round(secUntilStart)}s · ${srcIsAcapella ? 'instrumental' : tgtCat} on top` });
+
+    const phraseTimer = setTimeout(() => {
+      // Route layer to Center so it's heard regardless of crossfader
+      audio.bus.setAssign(layerIdx, 'C');
+      const channels = [...store.get().mixer.channels];
+      channels[layerIdx] = { ...channels[layerIdx], crossfaderAssign: 'C' };
+      store.set('mixer', { channels });
+
+      // Loop the bed deck (4 bars from current position)
+      const bedPos = audio.deck(bedDeckId).positionSec;
+      const bpmLocal = (store.get().decks[bedIdx].track?.bpm || 120) * (audio.deck(bedDeckId).tempo || 1);
+      const loopEnd = bedPos + 4 * 4 * 60 / bpmLocal;
+      audio.deck(bedDeckId).setLoop({ startSec: bedPos, endSec: loopEnd });
+      store.setIn('decks', bedIdx, { loop: { startSec: bedPos, endSec: loopEnd, active: true, bars: 4 } });
+
+      // If the bed is the target deck (acapella source), start it now
+      if (srcIsAcapella) {
+        audio.deck(targetId).play();
+        store.setIn('decks', tIdx, { isPlaying: true });
+      }
+
+      store.set('ui', { smartSyncStatus: `Mashup · ${srcIsAcapella ? 'instrumental bed' : tgtCat + ' layer'}` });
+
+      // Fade layer in over 2 bars
+      const cancels = [];
+      cancels.push(animateChannelVolume(layerIdx, 0, 0.75, fourBarMs / 2));
+
+      // Calculate when the layer's content ends
+      const layerLibTrack = library.tracks.find(t => t.id === (srcIsAcapella ? sourceTrack.id : matchTrack.id));
+      const layerPosition = srcIsAcapella ? audio.deck(deckId).positionSec : incomingStart;
+      const layerEndSec = (layerLibTrack?.outroStartSec || (layerLibTrack?.durationSec || 300) - 30);
+      const layerRemainingSec = Math.max(8 * 60 / bpmLocal, layerEndSec - layerPosition);
+
+      // Schedule fade-out
+      const totalMs = layerRemainingSec * 1000;
+      const fadeOutStartMs = Math.max(fourBarMs / 2, totalMs - fourBarMs / 2);
+      cancels.push(animateChannelVolume(layerIdx, 0.75, 0, fourBarMs / 2, fadeOutStartMs));
+
+      // Cleanup
+      const cleanupMs = fadeOutStartMs + fourBarMs / 2 + 200;
+      activeMix = {
+        cancels,
+        sIdx, tIdx, bedIdx, layerIdx, bedDeckId, layerDeckId,
+        sourceLowSnapshot: store.get().mixer.channels[sIdx].eq.low,
+        targetLowSnapshot: store.get().mixer.channels[tIdx].eq.low,
+        sourceMidSnapshot: store.get().mixer.channels[sIdx].eq.mid,
+        sourceHighSnapshot: store.get().mixer.channels[sIdx].eq.high,
+        sourceFilterSnapshot: store.get().mixer.channels[sIdx].filter,
+        targetFilterSnapshot: store.get().mixer.channels[tIdx].filter,
+        beatFxSnapshot: { ...store.get().mixer.beatFx },
+        finisherOnTimer: null, finisherOffTimer: null,
+        finishTimeout: null,
+        loopReleaseTimer: null, loopTrimTimer: null,
+        sourceId: bedDeckId,
+        technique: 'mashup',
+        useMidKill: false, finisher: 'none', useGrooveLoop: false,
+        isMashup: true,
+      };
+      activeMix.finishTimeout = setTimeout(() => {
+        audio.deck(bedDeckId).setLoop(null);
+        store.setIn('decks', bedIdx, { loop: null });
+        store.set('ui', { mashupActive: null, smartSyncActive: null, smartSyncStatus: 'Mashup complete ✓' });
+        setTimeout(() => store.set('ui', { smartSyncStatus: null }), 2000);
+        activeMix = null;
+      }, cleanupMs);
+    }, delayMs);
+
+    activeMix = {
+      cancels: [],
+      sIdx, tIdx,
+      sourceLowSnapshot: store.get().mixer.channels[sIdx].eq.low,
+      targetLowSnapshot: store.get().mixer.channels[tIdx].eq.low,
+      sourceMidSnapshot: store.get().mixer.channels[sIdx].eq.mid,
+      sourceFilterSnapshot: store.get().mixer.channels[sIdx].filter,
+      targetFilterSnapshot: store.get().mixer.channels[tIdx].filter,
+      beatFxSnapshot: { ...store.get().mixer.beatFx },
+      phraseTimer,
+      sourceId: bedDeckId,
+      finisher: 'none',
+      isMashup: true,
+    };
+  },
+
   // Cancel an in-progress auto-mix. Restores EQ snapshots + clears any source loop.
   cancel() {
     if (!activeMix) {
@@ -1006,7 +1182,7 @@ export const smartSync = {
     if (activeMix.sourceFilterSnapshot !== undefined) restoreFilter(activeMix.sIdx, activeMix.sourceFilterSnapshot);
     if (activeMix.targetFilterSnapshot !== undefined) restoreFilter(activeMix.tIdx, activeMix.targetFilterSnapshot);
     activeMix = null;
-    store.set('ui', { smartSyncActive: null, smartSyncStatus: 'Smart mix cancelled' });
+    store.set('ui', { smartSyncActive: null, mashupActive: null, smartSyncStatus: 'Smart mix cancelled' });
     setTimeout(() => store.set('ui', { smartSyncStatus: null }), 1500);
   },
 };

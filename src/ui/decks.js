@@ -179,12 +179,13 @@ function drawFxStrip(ctx, b, deckId, state, color, regionsOut, pressed) {
 }
 
 function drawTransport(ctx, b, deckId, state, color, regionsOut, pressed, fullState) {
-  const gap = 6;
-  const w = (b.w - gap * 3) / 4;
+  const gap = 4;
+  const w = (b.w - gap * 4) / 5;
   const cue = { x: b.x, y: b.y, w, h: b.h };
   const play = { x: b.x + (w + gap), y: b.y, w, h: b.h };
   const sync = { x: b.x + (w + gap) * 2, y: b.y, w, h: b.h };
   const smart = { x: b.x + (w + gap) * 3, y: b.y, w, h: b.h };
+  const mash = { x: b.x + (w + gap) * 4, y: b.y, w, h: b.h };
 
   P.button(ctx, cue, { label: 'CUE', bg: theme.panel2, pressed: pressed?.type === 'cue' && pressed?.deckId === deckId });
   regionsOut.push({ type: 'cue', deckId, bounds: cue });
@@ -195,17 +196,27 @@ function drawTransport(ctx, b, deckId, state, color, regionsOut, pressed, fullSt
   P.button(ctx, sync, { label: 'SYNC', active: state.syncEnabled, color, glow: state.syncEnabled, pressed: pressed?.type === 'sync' && pressed?.deckId === deckId });
   regionsOut.push({ type: 'sync', deckId, bounds: sync });
 
-  // SMART SYNC button — glows cyan when active, shows status indicator
-  const smartActive = fullState?.ui?.smartSyncActive === deckId;
-  const smartColor = smartActive ? theme.cyan : color;
+  // SMART SYNC button — standard transition (bass-swap crossfade)
+  const smartActive = fullState?.ui?.smartSyncActive === deckId && !fullState?.ui?.mashupActive;
   P.button(ctx, smart, {
     label: smartActive ? '◈ MIX' : 'SMART',
     active: smartActive,
-    color: smartColor,
+    color: theme.cyan,
     glow: smartActive,
     pressed: pressed?.type === 'smartSync' && pressed?.deckId === deckId,
   });
   regionsOut.push({ type: 'smartSync', deckId, bounds: smart });
+
+  // MASH button — explicit acapella/instrumental layering mode
+  const mashActive = fullState?.ui?.mashupActive === deckId;
+  P.button(ctx, mash, {
+    label: mashActive ? '◈ MASH' : 'MASH',
+    active: mashActive,
+    color: theme.deckB,
+    glow: mashActive,
+    pressed: pressed?.type === 'mashup' && pressed?.deckId === deckId,
+  });
+  regionsOut.push({ type: 'mashup', deckId, bounds: mash });
 }
 
 function fmtTime(sec) {

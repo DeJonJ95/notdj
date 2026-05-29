@@ -3,7 +3,7 @@ import { store } from '../state/index.js';
 import { audio } from '../engine/audio-engine.js';
 import { extractPeaks } from '../engine/waveform-analyzer.js';
 import { detectBpm } from '../engine/beat-engine.js';
-import { library } from '../services/library-manager.js';
+import { library, detectCategory } from '../services/library-manager.js';
 import { sync } from '../engine/sync-engine.js';
 import { clamp } from '../utils/math.js';
 import { smartSync } from '../engine/smart-sync.js';
@@ -107,6 +107,9 @@ export const actions = {
   // --- Smart Sync (auto-harmonic mixing) ---
   async smartSync(deckId) {
     await smartSync.execute(deckId);
+  },
+  async mashup(deckId) {
+    await smartSync.executeMashup(deckId);
   },
   setPadMode(deckId, mode) {
     store.setIn('decks', idx(deckId), { padMode: mode });
@@ -326,6 +329,11 @@ export const actions = {
   async loadFromLibrary(deckId, track) {
     const audioBuf = await library.getDecodedBuffer(track);
     audio.deck(deckId).load(audioBuf);
+    // Re-detect category for legacy tracks (imported before category detection existed)
+    let category = track.category;
+    if (!category || category === 'full') {
+      category = detectCategory(track.title, '');
+    }
     store.setIn('decks', idx(deckId), {
       track: {
         id: track.id,
@@ -334,7 +342,7 @@ export const actions = {
         durationSec: track.durationSec,
         bpm: track.bpm,
         key: track.key,
-        category: track.category || 'full',
+        category: category || 'full',
       },
       buffer: audioBuf,
       peaks: track.peaks,
