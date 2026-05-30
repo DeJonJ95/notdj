@@ -85,6 +85,9 @@ function template() {
         <div class="crate" data-crate="low-bpm">90-110 BPM</div>
         <div class="crate" data-crate="mid-bpm">115-130 BPM</div>
         <div class="crate" data-crate="high-bpm">130+ BPM</div>
+        <h3 style="margin-top:24px;">Category</h3>
+        <div class="crate" data-crate="acapella">🎤 Acapella</div>
+        <div class="crate" data-crate="instrumental">🎵 Instrumental</div>
       </div>
       <div class="lib-list" id="lib-list">
         <div class="lib-row head">
@@ -152,6 +155,8 @@ function bind(overlay) {
     else if (filter === 'low-bpm') tracks = tracks.filter((t) => t.bpm >= 90 && t.bpm < 115);
     else if (filter === 'mid-bpm') tracks = tracks.filter((t) => t.bpm >= 115 && t.bpm < 130);
     else if (filter === 'high-bpm') tracks = tracks.filter((t) => t.bpm >= 130);
+    else if (filter === 'acapella') tracks = tracks.filter((t) => (t.category || 'full') === 'acapella');
+    else if (filter === 'instrumental') tracks = tracks.filter((t) => (t.category || 'full') === 'instrumental');
     if (query) {
       tracks = tracks.filter((t) =>
         t.title.toLowerCase().includes(query) ||
@@ -192,12 +197,14 @@ function bind(overlay) {
   function rowHtml(t) {
     const dur = fmt(t.durationSec);
     const art = t.artwork ? `<img class="lib-art" src="${URL.createObjectURL(t.artwork)}" />` : `<div class="lib-art"></div>`;
+    const cat = t.category || 'full';
+    const catBadge = cat !== 'full' ? ` <span style="font-size:9px;color:${cat === 'acapella' ? '#ff3d5a' : '#fbbf24'};font-weight:700;">${cat.toUpperCase()}</span>` : '';
     return `
       <div class="lib-row" data-id="${t.id}">
         ${art}
         <div>
           <div class="lib-title">${escape(t.title)}</div>
-          <div class="lib-artist">${escape(t.artist || '—')}${t.album ? ' · ' + escape(t.album) : ''}</div>
+          <div class="lib-artist">${escape(t.artist || '—')}${t.album ? ' · ' + escape(t.album) : ''}${catBadge}</div>
         </div>
         <div class="lib-bpm">${t.bpm.toFixed(1)}</div>
         <div class="lib-key">${escape(t.key || '—')}</div>

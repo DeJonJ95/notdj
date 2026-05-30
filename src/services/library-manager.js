@@ -67,6 +67,9 @@ class LibraryManager {
     const { peaks, bandedPeaks, bpm } = await this._analyze(mono, decoded.sampleRate, decoded.duration);
     onProgress?.(0.9);
 
+    // Detect track category from title: acapella, instrumental, or full
+    const category = detectCategory(tags.title, file.name);
+
     const track = {
       id,
       title: tags.title,
@@ -74,6 +77,7 @@ class LibraryManager {
       album: tags.album,
       year: tags.year,
       genre: tags.genre,
+      category,                          // 'full' | 'acapella' | 'instrumental'
       bpm: tags.bpmTag || bpm,
       key: tags.keyTag || '—',
       durationSec: decoded.duration,
@@ -141,6 +145,16 @@ function mixdown(buffer) {
   const out = new Float32Array(l.length);
   for (let i = 0; i < l.length; i++) out[i] = (l[i] + r[i]) * 0.5;
   return out;
+}
+
+// Detect track category from title or filename.
+// Returns 'acapella', 'instrumental', or 'full' (default).
+function detectCategory(title, filename) {
+  const text = `${title || ''} ${filename || ''}`.toLowerCase();
+  // Check acapella variants first so an "Instrumental Acapella" oddity still gets classified
+  if (/\bacapella\b|\ba cappella\b/i.test(text)) return 'acapella';
+  if (/\binstrumental\b/i.test(text)) return 'instrumental';
+  return 'full';
 }
 
 export const library = new LibraryManager();

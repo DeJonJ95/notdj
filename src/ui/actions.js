@@ -334,6 +334,7 @@ export const actions = {
         durationSec: track.durationSec,
         bpm: track.bpm,
         key: track.key,
+        category: track.category || 'full',
       },
       buffer: audioBuf,
       peaks: track.peaks,
