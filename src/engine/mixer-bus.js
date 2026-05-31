@@ -129,18 +129,24 @@ export class MixerBus {
   setCrossfader(x) {
     const curve = this.crossfaderCurve || 'sharp';
     let a, b;
+    const t = (clamp(x, -1, 1) + 1) * 0.5; // 0..1
+
     if (curve === 'smooth') {
       // Linear equal-power
       ({ a, b } = crossfadeGains(x));
     } else if (curve === 'dipped') {
       // -6 dB at center (sums in-phase signals correctly)
-      const t = (clamp(x, -1, 1) + 1) * 0.5;
       a = 1 - t; b = t;
     } else {
-      // Sharp: fast cut, fully open within ±0.4 of edges
-      const t = (clamp(x, -1, 1) + 1) * 0.5;
-      a = Math.min(1, Math.cos(t * Math.PI * 0.5) * 1.4);
-      b = Math.min(1, Math.sin(t * Math.PI * 0.5) * 1.4);
+      // Sharp: dead zone at each end — first/last 15% fully muted on the cut side
+      const deadZone = 0.15;
+      if (t <= deadZone) { a = 1; b = 0; }
+      else if (t >= 1 - deadZone) { a = 0; b = 1; }
+      else {
+        const mt = (t - deadZone) / (1 - 2 * deadZone); // remap 0..1 across live zone
+        a = Math.cos(mt * Math.PI * 0.5);
+        b = Math.sin(mt * Math.PI * 0.5);
+      }
     }
     this.xfL.gain.value = a;
     this.xfR.gain.value = b;
