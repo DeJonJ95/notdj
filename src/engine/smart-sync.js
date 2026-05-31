@@ -1,18 +1,20 @@
 // Smart Sync — automatic harmonic mixing assistant.
 //
 // Tapping SMART on a deck does:
-//   1. Analyze the CURRENT deck's track (BPM, key, phrase position)
+//   1. Analyze the CURRENT deck's track (BPM, key, energy)
 //   2. Scan the library for the best compatible track for the OPPOSITE deck
-//   3. Rank by: harmonic key match → BPM closeness → energy proxy
+//   3. Rank by: harmonic key match → BPM closeness → energy similarity → category
 //   4. Load the winner to the other deck, enable sync
-//   5. If both decks playable: auto-crossfade at the next phrase boundary
+//   5. If both decks playable: at the next phrase boundary, run a real DJ-style
+//      bass-swap crossfade — incoming bass ramps up over first half while
+//      outgoing bass cuts on the second half; crossfader rides through.
 //
 // Harmonic mixing uses the Camelot Wheel (Open Key standard).
 //   Same # + letter      = perfect (0)
 //   ±1, same letter      = adjacent, very compatible (1)
 //   Same #, opp letter   = relative major/minor, very compatible (1)
 //   ±1, opp letter       = energy boost / drop, compatible (2)
-//   Everything else      = not ranked
+//   Everything else      = treated as neutral but penalised
 
 import { store } from '../state/index.js';
 import { audio } from './audio-engine.js';
@@ -20,31 +22,43 @@ import { library } from '../services/library-manager.js';
 import { sync } from './sync-engine.js';
 
 // ── Camelot Wheel ──────────────────────────────────────────────────────────
+//
+// Both sharp AND flat enharmonic spellings map to the same Camelot position
+// so dirty tag data ("Db", "C#", "D♭", "C♯") all resolve correctly.
 
-// Maps a key string to its Camelot position { number, letter }
-// Standard notation (C, Am, F#m, Eb, etc.) → Camelot (8B, 8A, 11A, 5B, etc.)
 const KEY_MAP = {
   // Major keys → B (bottom of wheel)
   'C':   { num: 8,  letter: 'B' }, 'G':  { num: 9,  letter: 'B' },
   'D':   { num: 10, letter: 'B' }, 'A':  { num: 11, letter: 'B' },
   'E':   { num: 12, letter: 'B' }, 'B':  { num: 1,  letter: 'B' },
-  'F#':  { num: 2,  letter: 'B' }, 'C#': { num: 3,  letter: 'B' },
-  'Ab':  { num: 4,  letter: 'B' }, 'Eb': { num: 5,  letter: 'B' },
-  'Bb':  { num: 6,  letter: 'B' }, 'F':  { num: 7,  letter: 'B' },
+  'F':   { num: 7,  letter: 'B' },
+  // Black-key majors (both spellings)
+  'F#':  { num: 2,  letter: 'B' }, 'Gb': { num: 2,  letter: 'B' },
+  'C#':  { num: 3,  letter: 'B' }, 'Db': { num: 3,  letter: 'B' },
+  'G#':  { num: 4,  letter: 'B' }, 'Ab': { num: 4,  letter: 'B' },
+  'D#':  { num: 5,  letter: 'B' }, 'Eb': { num: 5,  letter: 'B' },
+  'A#':  { num: 6,  letter: 'B' }, 'Bb': { num: 6,  letter: 'B' },
+
   // Minor keys → A (top of wheel)
   'Am':  { num: 8,  letter: 'A' }, 'Em': { num: 9,  letter: 'A' },
-  'Bm':  { num: 10, letter: 'A' }, 'F#m':{ num: 11, letter: 'A' },
-  'C#m': { num: 12, letter: 'A' }, 'G#m':{ num: 1,  letter: 'A' },
-  'D#m': { num: 2,  letter: 'A' }, 'A#m':{ num: 3,  letter: 'A' },
+  'Bm':  { num: 10, letter: 'A' },
+  'F#m': { num: 11, letter: 'A' }, 'Gbm':{ num: 11, letter: 'A' },
+  'C#m': { num: 12, letter: 'A' }, 'Dbm':{ num: 12, letter: 'A' },
+  'G#m': { num: 1,  letter: 'A' }, 'Abm':{ num: 1,  letter: 'A' },
+  'D#m': { num: 2,  letter: 'A' }, 'Ebm':{ num: 2,  letter: 'A' },
+  'A#m': { num: 3,  letter: 'A' }, 'Bbm':{ num: 3,  letter: 'A' },
   'Fm':  { num: 4,  letter: 'A' }, 'Cm': { num: 5,  letter: 'A' },
   'Gm':  { num: 6,  letter: 'A' }, 'Dm': { num: 7,  letter: 'A' },
 };
 
 // Parse a key string into Camelot { num, letter } or null on failure.
-// Handles: "C", "Am", "F#min", "Eb major", "8A", "11B", "—"
+// Handles: "C", "Am", "F#min", "Eb major", "8A", "11B", "—", "C♯", "D♭m"
 function parseKey(key) {
   if (!key || key === '—' || key === '-') return null;
-  const s = String(key).trim();
+  let s = String(key).trim();
+
+  // Normalize unicode accidentals
+  s = s.replace(/♯/g, '#').replace(/♭/g, 'b');
 
   // Already in Camelot notation (e.g. "8A", "12B", "5B")
   const camelotMatch = s.match(/^(\d{1,2})\s*([AB])$/i);
@@ -54,196 +68,208 @@ function parseKey(key) {
     return null;
   }
 
-  // Normalize: strip words like "major", "minor", "maj", "min"
+  // Strip "major" / "minor" verbose words
   let root = s.replace(/\s*(major|minor|maj|min)\s*/gi, '').trim();
 
-  // If it ends with "m" treat as minor
-  const isMinor = /m$/i.test(root);
+  // Detect minor by trailing 'm' that isn't part of an accidental letter sequence
+  // (Am, Cm, F#m all end in m; A, C don't)
+  const isMinor = /m$/.test(root);
   if (isMinor) {
     const nk = root.slice(0, -1).trim();
-    // Handle accidentals: "F#m", "Bbm", etc.
-    const flatSharp = /[#♯b♭]$/.test(nk);
-    root = nk;
-    if (!flatSharp) {
-      // Could be just a letter + 'm' like "Am" → already in our map
-      const candidate = root + 'm';
-      if (KEY_MAP[candidate]) return KEY_MAP[candidate];
-    }
-    const candidate = root + 'm';
+    const candidate = nk + 'm';
     if (KEY_MAP[candidate]) return KEY_MAP[candidate];
   }
 
-  // Try direct match (C, G, Dm, etc.)
+  // Direct match for major
   if (KEY_MAP[root]) return KEY_MAP[root];
-  // Try with lower-case m for minor that wasn't handled above
+  // Try as minor as a fallback
   if (KEY_MAP[root + 'm']) return KEY_MAP[root + 'm'];
-
-  // Fuzzy: match first char, see if it's a known root
-  const single = root.charAt(0).toUpperCase();
-  const accidental = /[#♯b♭]/.test(root.charAt(1) || '') ? root.charAt(1) : '';
-  const tryKey = single + (accidental === '#' ? '#' : accidental === 'b' ? 'b' : '');
-  if (KEY_MAP[tryKey]) return KEY_MAP[tryKey];
-  if (KEY_MAP[tryKey + 'm']) return KEY_MAP[tryKey + 'm'];
 
   return null;
 }
 
 // Compute harmonic compatibility between two Camelot positions.
-// Returns: 0 (perfect) / 1 (very compatible) / 2 (good) / Infinity (don't mix)
-//                                          ↓ ±1 around wheel wraps 12→1
+// Returns: 0 (perfect) / 1 (very compatible) / 2 (good) / Infinity (incompatible)
 function harmonicDistance(a, b) {
   if (!a || !b) return Infinity;
-
-  // Same number + same letter = perfect (0)
   if (a.num === b.num && a.letter === b.letter) return 0;
-
-  // Same number, opposite letter = relative major/minor (1)
   if (a.num === b.num && a.letter !== b.letter) return 1;
-
-  // Adjacent on wheel, same letter = energy move (1)
   const adj = (Math.abs(a.num - b.num) === 1) || (a.num === 1 && b.num === 12) || (a.num === 12 && b.num === 1);
   if (adj && a.letter === b.letter) return 1;
-
-  // Adjacent, opposite letter = bigger energy shift (2)
   if (adj && a.letter !== b.letter) return 2;
-
   return Infinity;
 }
 
-// ── Energy proxy (BPM-based) ──────────────────────────────────────────────
-// Higher BPM = generally more energetic for the same genre.
-// We compute a 0..1 score from the playing deck's BPM range.
+// ── Reason-text builder for top-candidate explanations ──────────────────
 
-function energyScore(bpm, referenceBpm) {
-  if (!bpm || !referenceBpm) return 0.5;
-  const ratio = bpm / referenceBpm;
-  // 0.75x - 1.33x range → map to 0..1 energy scale
-  if (ratio >= 0.8 && ratio <= 1.25) return 0.5 + 0.5 * ((ratio - 0.8) / 0.45);
-  if (ratio < 0.8) return Math.max(0, 0.5 * (ratio / 0.8));
-  return Math.min(1, 0.5 + 0.5 * ((ratio - 1.25) / 0.3));
+function camelotStr(c) { return c ? `${c.num}${c.letter}` : '?'; }
+
+function buildReasons({ sourceKey, targetKey, harmDist, sourceBpm, targetBpm, sourceEnergy, targetEnergy, srcCat, tgtCat, setIntent, recentlyPlayedMin }) {
+  const out = [];
+  if (sourceKey && targetKey) {
+    if (harmDist === 0) out.push(`Perfect key (${camelotStr(sourceKey)})`);
+    else if (harmDist === 1 && sourceKey.letter !== targetKey.letter) out.push(`Relative ${camelotStr(sourceKey)} → ${camelotStr(targetKey)}`);
+    else if (harmDist === 1) out.push(`Adjacent key ${camelotStr(sourceKey)} → ${camelotStr(targetKey)}`);
+    else if (harmDist === 2) out.push(`Energy move ${camelotStr(sourceKey)} → ${camelotStr(targetKey)}`);
+    else out.push(`Key mismatch ${camelotStr(sourceKey)} → ${camelotStr(targetKey)}`);
+  }
+  if (sourceBpm && targetBpm) {
+    const delta = targetBpm - sourceBpm;
+    if (Math.abs(delta) < 0.5) out.push(`Same BPM`);
+    else out.push(`${delta > 0 ? '+' : ''}${delta.toFixed(1)} BPM`);
+  }
+  const eDelta = (targetEnergy ?? 0.5) - (sourceEnergy ?? 0.5);
+  if (Math.abs(eDelta) < 0.08) out.push(`Same energy`);
+  else if (eDelta > 0) out.push(`Energy build`);
+  else out.push(`Energy drop`);
+  if (srcCat === 'acapella' && tgtCat === 'instrumental') out.push(`Acapella over instrumental`);
+  else if (srcCat === 'instrumental' && tgtCat === 'acapella') out.push(`Acapella drop`);
+  if (setIntent && setIntent !== 'sustain') out.push(`${setIntent} intent`);
+  if (recentlyPlayedMin !== undefined && recentlyPlayedMin < 60) {
+    out.push(`played ${Math.round(recentlyPlayedMin)}m ago`);
+  }
+  return out;
 }
 
-// ── Auto-Crossfade ────────────────────────────────────────────────────────
+// ── Auto-Mix Animation ────────────────────────────────────────────────────
 
-let autoMixTimer = null;
+let activeMix = null; // tracking object for in-progress smart mix
 
 // Smoothly move the crossfader from current position to target over `durationMs`.
-// Calls setCrossfader() incrementally so the hardware channel assignment is respected.
-function animateCrossfader(target, durationMs) {
-  if (autoMixTimer) {
-    cancelAnimationFrame(autoMixTimer);
-    autoMixTimer = null;
-  }
+function animateCrossfader(target, durationMs, onDone) {
   const start = store.get().mixer.crossfader;
   const startTime = performance.now();
+  let raf;
 
   function tick() {
     const elapsed = performance.now() - startTime;
     const t = Math.min(1, elapsed / durationMs);
-    // Ease-in-out cubic for smooth transition
     const eased = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
     const value = start + (target - start) * eased;
-
-    const { setCrossfader } = getActions();
-    setCrossfader(value);
-
-    if (t < 1) {
-      autoMixTimer = requestAnimationFrame(tick);
-    } else {
-      autoMixTimer = null;
-      // Signal completion: turn off smart sync indicator on the faded-OUT deck
-      store.set('ui', { smartSyncActive: null });
-    }
+    audio.bus.setCrossfader(value);
+    store.set('mixer', { crossfader: value });
+    if (t < 1) raf = requestAnimationFrame(tick);
+    else { raf = null; if (onDone) onDone(); }
   }
-  tick();
+  raf = requestAnimationFrame(tick);
+  return () => { if (raf) cancelAnimationFrame(raf); };
 }
 
-// Wait until the next downbeat boundary (phrase start) then fire callback.
+// Animate a channel's low EQ from `from` to `to` over `durationMs`,
+// starting after `delayMs`. Updates audio + store so the knob renders the move.
+function animateEqLow(chIdx, from, to, durationMs, delayMs = 0) {
+  const startTime = performance.now() + delayMs;
+  let raf;
+  function tick(now) {
+    if (now < startTime) { raf = requestAnimationFrame(tick); return; }
+    const t = Math.min(1, (now - startTime) / durationMs);
+    const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    const v = from + (to - from) * eased;
+    audio.bus.setEq(chIdx, 'low', v);
+    const channels = [...store.get().mixer.channels];
+    channels[chIdx] = { ...channels[chIdx], eq: { ...channels[chIdx].eq, low: v } };
+    store.set('mixer', { channels });
+    if (t < 1) raf = requestAnimationFrame(tick);
+    else raf = null;
+  }
+  raf = requestAnimationFrame(tick);
+  return () => { if (raf) cancelAnimationFrame(raf); };
+}
+
+// Wait until the next phrase boundary then fire callback.
 function waitForPhrase(deckId, callback, { bars = 4 } = {}) {
   const dp = audio.deck(deckId);
   const deckState = store.get().decks.find(d => d.id === deckId);
   const bpm = deckState?.track?.bpm || 120;
   const beatSec = 60 / bpm;
-  const phraseSec = bars * 4 * beatSec; // 4 beats per bar × N bars
+  const phraseBeats = bars * 4;
 
-  // Phase within current 4-bar phrase
   const currentPos = dp.positionSec;
   const beatsElapsed = (currentPos * bpm) / 60;
-  const phraseBeats = 16; // 4 bars × 4 beats
   const beatsIntoPhrase = beatsElapsed % phraseBeats;
   const secUntilNextPhrase = (phraseBeats - beatsIntoPhrase) * beatSec;
-
-  // Small delay to avoid clicking in the same frame
   const delayMs = Math.max(50, secUntilNextPhrase * 1000);
-
-  setTimeout(callback, delayMs);
+  return setTimeout(callback, delayMs);
 }
 
-function getActions() {
-  // Dynamic import to avoid circular dependency at module load time
-  return { setCrossfader: (v) => {
-    audio.bus.setCrossfader(v);
-    store.set('mixer', { crossfader: v });
-  }};
+// Restore EQ low to its snapshot value (used on completion or cancel).
+function restoreEqLow(chIdx, value) {
+  audio.bus.setEq(chIdx, 'low', value);
+  const channels = [...store.get().mixer.channels];
+  channels[chIdx] = { ...channels[chIdx], eq: { ...channels[chIdx].eq, low: value } };
+  store.set('mixer', { channels });
 }
 
 // ── Main API ──────────────────────────────────────────────────────────────
 
 export const smartSync = {
 
-  // Find the best compatible track from the library for the given source deck.
-  // Returns: track object or null (only null if library is empty).
-  findMatch(deckId) {
+  // Score every library track for compatibility against the source deck.
+  // Returns sorted list of { track, harmScore, bpmScore, energyScore, categoryScore, total, reasons[] }.
+  findCandidates(deckId, n = 3) {
     const decks = store.get().decks;
     const sourceDeck = decks.find(d => d.id === deckId);
     const targetDeck = decks.find(d => d.id !== deckId);
 
     const sourceTrack = sourceDeck?.track;
-    if (!sourceTrack || !sourceTrack.bpm) return null;
+    if (!sourceTrack || !sourceTrack.bpm) return [];
 
     const sourceBpm = sourceTrack.bpm;
     const sourceKey = parseKey(sourceTrack.key);
+    const sourceLibTrack = library.tracks.find(t => t.id === sourceTrack.id);
+    const sourceEnergy = sourceLibTrack?.energy ?? 0.5;
     const tracks = library.tracks;
-    if (!tracks.length) return null;
+    if (!tracks.length) return [];
 
-    // Don't recommend the currently loaded track on the other deck
     const excludeIds = new Set();
     if (targetDeck?.track?.id) excludeIds.add(targetDeck.track.id);
     if (sourceTrack?.id) excludeIds.add(sourceTrack.id);
 
-    // Score every candidate (NO hard skips beyond empty library or active deck tracks)
-    let best = null;
-    let bestScore = -Infinity;
+    // ── History + intent context ──────────────────────────────────────────
+    const ui = store.get().ui;
+    const setIntent = ui.setIntent || 'sustain';
+    const history = ui.mixHistory || [];
+    const now = Date.now();
+    const recentMs15 = 15 * 60 * 1000;  // 15 min
+    const recentMs60 = 60 * 60 * 1000;  // 60 min
+    const recentTrackIds = new Map(); // trackId -> minutesAgo
+    for (const h of history) {
+      const ageMin = (now - h.loadedAt) / 60000;
+      if (!recentTrackIds.has(h.trackId) || recentTrackIds.get(h.trackId) > ageMin) {
+        recentTrackIds.set(h.trackId, ageMin);
+      }
+    }
+    const sourceArtist = (sourceTrack.artist || '').trim().toLowerCase();
+
+    const ranked = [];
 
     for (const t of tracks) {
       if (excludeIds.has(t.id)) continue;
 
-      // ── Key / harmonic score ──────────────────────────────────────
       const targetKey = parseKey(t.key);
       let harmDist;
-      if (!sourceKey || !targetKey) {
-        harmDist = 0; // unknown key → treat as neutral
-      } else {
-        harmDist = harmonicDistance(sourceKey, targetKey);
-      }
-      // Score 100 (perfect) down to 10 (compatible). Incompatible = still 5 not 0.
-      const harmScore = harmDist === Infinity ? 5 : 100 - harmDist * 30;
+      if (!sourceKey || !targetKey) harmDist = 0;
+      else harmDist = harmonicDistance(sourceKey, targetKey);
+      const harmScore = harmDist === Infinity ? 10 : 100 - harmDist * 30;
 
-      // ── BPM score (always scored, never skipped) ──────────────────
       const bpmRatio = t.bpm ? t.bpm / sourceBpm : 1;
       let bpmScore;
       if (bpmRatio >= 0.95 && bpmRatio <= 1.05) bpmScore = 100;
       else if (bpmRatio >= 0.90 && bpmRatio <= 1.10) bpmScore = 70;
       else if (bpmRatio >= 0.85 && bpmRatio <= 1.15) bpmScore = 40;
-      else if (bpmRatio >= 0.75 && bpmRatio <= 1.25) bpmScore = 15;  // stretchable
-      else bpmScore = 5;                                               // big stretch but possible
+      else if (bpmRatio >= 0.75 && bpmRatio <= 1.25) bpmScore = 15;
+      else bpmScore = 5;
 
-      // ── Energy ────────────────────────────────────────────────────
-      const energy = energyScore(t.bpm || sourceBpm, sourceBpm);
-      const energyScoreVal = 50 - Math.abs(energy - 0.5) * 40;
-      const energyDirection = (t.bpm || sourceBpm) > sourceBpm ? 5 : 0;
+      const targetEnergy = t.energy ?? 0.5;
+      const energyDelta = Math.abs(targetEnergy - sourceEnergy);
+      const energyScore = Math.max(0, 100 - energyDelta * 200);
+      // Intent-biased energy direction
+      const energyDiff = targetEnergy - sourceEnergy;
+      let energyDirection = 0;
+      if (setIntent === 'build')      energyDirection = energyDiff > 0 ? 20 : -10;
+      else if (setIntent === 'cooldown') energyDirection = energyDiff < 0 ? 20 : -10;
+      else /* sustain */              energyDirection = Math.abs(energyDiff) < 0.1 ? 10 : -5;
 
-      // ── Category compatibility ────────────────────────────────────
       const srcCat = sourceTrack.category || 'full';
       const tgtCat = t.category || 'full';
       let categoryScore = 0;
@@ -255,21 +281,46 @@ export const smartSync = {
       else if (srcCat === 'full' && tgtCat === 'instrumental') categoryScore = 10;
       else if (srcCat === 'acapella' && tgtCat === 'acapella') categoryScore = -100;
 
-      const total = harmScore * 3 + bpmScore * 2 + energyScoreVal + energyDirection + categoryScore;
-
-      if (total > bestScore) {
-        bestScore = total;
-        best = t;
+      // ── History penalty ──────────────────────────────────────────────
+      let historyPenalty = 0;
+      const ageMin = recentTrackIds.get(t.id);
+      if (ageMin !== undefined) {
+        if (ageMin < 15) historyPenalty = -300;       // very recently played, hard avoid
+        else if (ageMin < 60) historyPenalty = -100;  // played within the hour, mild avoid
+        else historyPenalty = -20;                    // played within the session
       }
+      // Same-artist back-to-back penalty (skipped for mashup pairings, where it's intentional)
+      const targetArtist = (t.artist || '').trim().toLowerCase();
+      const sameArtist = sourceArtist && targetArtist && sourceArtist === targetArtist;
+      const isMashupPair = (srcCat === 'acapella' && tgtCat === 'instrumental') || (srcCat === 'instrumental' && tgtCat === 'acapella');
+      if (sameArtist && !isMashupPair) historyPenalty -= 30;
+
+      const total = harmScore * 3 + bpmScore * 2 + energyScore + energyDirection + categoryScore + historyPenalty;
+
+      const reasons = buildReasons({
+        sourceKey, targetKey, harmDist,
+        sourceBpm, targetBpm: t.bpm,
+        sourceEnergy, targetEnergy,
+        srcCat, tgtCat,
+        setIntent,
+        recentlyPlayedMin: ageMin,
+      });
+
+      ranked.push({ track: t, harmScore, bpmScore, energyScore, categoryScore, historyPenalty, total, reasons });
     }
 
-    return best;
+    ranked.sort((a, b) => b.total - a.total);
+    return ranked.slice(0, n);
+  },
+
+  // Convenience: return the single best match.
+  findMatch(deckId) {
+    const top = this.findCandidates(deckId, 1);
+    return top[0] || null;
   },
 
   // Execute the full smart sync + auto-mix workflow.
-  // deckId = the deck whose SMART button was tapped.
   async execute(deckId) {
-    // Already in a smart sync transition?
     if (store.get().ui.smartSyncActive) {
       this.cancel();
       return;
@@ -278,86 +329,180 @@ export const smartSync = {
     const decks = store.get().decks;
     const sourceDeck = decks.find(d => d.id === deckId);
     const targetId = deckId === 'A' ? 'B' : 'A';
-    const targetDeck = decks.find(d => d.id === targetId);
 
-    // Step 1: Find the best matching track
     const match = this.findMatch(deckId);
     if (!match) {
       const count = library.tracks.length;
-      const otherDeckTrack = store.get().decks.find(d => d.id !== deckId)?.track;
+      const otherTrack = store.get().decks.find(d => d.id !== deckId)?.track;
       let msg;
-      if (count === 0) {
-        msg = 'Library empty — import tracks first';
-      } else if (otherDeckTrack && count <= 2) {
-        msg = `Only "${otherDeckTrack.title}" on other deck — nothing else to load`;
-      } else {
-        msg = `No match found in ${count} tracks`;
-      }
+      if (count === 0) msg = 'Library empty — import tracks first';
+      else if (otherTrack && count <= 2) msg = `Only "${otherTrack.title}" on other deck — nothing else to load`;
+      else msg = `No match found in ${count} tracks`;
       store.set('ui', { smartSyncStatus: msg });
       setTimeout(() => store.set('ui', { smartSyncStatus: null }), 3000);
       return;
     }
 
-    // Step 2: Mark active
-    store.set('ui', { smartSyncActive: targetId, smartSyncStatus: `→ ${match.title}` });
+    const { track: matchTrack, harmScore, bpmScore, energyScore, reasons } = match;
+    const reasonText = reasons.slice(0, 2).join(' · ');
+    store.set('ui', { smartSyncActive: targetId, smartSyncStatus: `→ ${matchTrack.title} · ${reasonText}` });
 
-    // Step 3: Load match to the other deck
-    const { loadFromLibrary } = await getActionsAsync();
-    await loadFromLibrary(targetId, match);
+    // Load match to opposite deck
+    const { actions } = await import('../ui/actions.js');
+    await actions.loadFromLibrary(targetId, matchTrack);
 
-    // Step 4: Enable sync on the target deck
     const tIdx = targetId === 'A' ? 0 : 1;
     store.setIn('decks', tIdx, { syncEnabled: true });
     sync.setMaster(deckId);
+
+    // ── Position incoming track based on structure + mashup intent ──────
+    // Default: skip the intro pad and start at the body (introEndSec).
+    const incomingDp = audio.deck(targetId);
+    const matchOnLib = library.tracks.find(t => t.id === matchTrack.id) || matchTrack;
+    let incomingStart = Math.max(0, matchOnLib.introEndSec || matchOnLib.firstBeatSec || 0);
+
+    // Mashup: if loading an acapella over a full/instrumental track, align the
+    // acapella's first vocal entry with the source's outro start (= where the
+    // instrumental body opens up). Same for instrumental loaded under an acapella.
+    const srcCat = sourceDeck.track.category || 'full';
+    const tgtCat = matchTrack.category || 'full';
+    const isMashup = (srcCat === 'acapella' && (tgtCat === 'instrumental' || tgtCat === 'full')) ||
+                     ((srcCat === 'instrumental' || srcCat === 'full') && tgtCat === 'acapella');
+    if (isMashup) {
+      const sourceOutroStart = sourceLibTrack?.outroStartSec ?? sourceDeck.track.durationSec;
+      const sourcePosNow = audio.deck(deckId).positionSec;
+      const secondsUntilOutro = Math.max(0, sourceOutroStart - sourcePosNow);
+      // Place incoming so its firstVocal lands on source outro (or current spot if past)
+      const vocalAnchor = matchOnLib.firstVocalSec || matchOnLib.introEndSec || 0;
+      incomingStart = Math.max(0, vocalAnchor - secondsUntilOutro);
+    }
+    if (incomingStart > 0 && incomingStart < incomingDp.durationSec - 30) {
+      incomingDp.seek(incomingStart);
+      store.setIn('decks', tIdx, { positionSec: incomingStart });
+    }
+
     sync.align(targetId);
 
-    // Step 5: Auto-mix — wait for phrase boundary then crossfade
     const sourcePlaying = sourceDeck?.isPlaying;
-    if (sourcePlaying) {
-      const sIdx = deckId === 'A' ? 0 : 1;
-      store.set('ui', { smartSyncStatus: 'Waiting for phrase boundary…' });
-
-      waitForPhrase(deckId, async () => {
-        // Start playing the loaded track
-        audio.deck(targetId).play();
-        store.setIn('decks', tIdx, { isPlaying: true });
-
-        // Crossfade over 8 bars (≈ 16 sec at 120 BPM)
-        const bpm = sourceDeck.track?.bpm || 120;
-        const crossfadeDuration = (8 * 4 * 60 / bpm) * 1000;
-
-        store.set('ui', { smartSyncStatus: `Mixing over ${Math.round(crossfadeDuration / 1000)}s…` });
-
-        animateCrossfader(targetId === 'A' ? -1 : 1, crossfadeDuration);
-
-        // After crossfade completes, stop the source deck
-        setTimeout(() => {
-          audio.deck(deckId).pause();
-          store.setIn('decks', sIdx, { isPlaying: false });
-          store.set('ui', { smartSyncStatus: 'Smart mix complete ✓' });
-          setTimeout(() => store.set('ui', { smartSyncStatus: null }), 2000);
-        }, crossfadeDuration + 200);
-
-      }, { bars: 2 });
-    } else {
-      // Source not playing — just load and let the user take over
-      store.set('ui', { smartSyncActive: null, smartSyncStatus: `Loaded to Deck ${targetId}` });
-      setTimeout(() => store.set('ui', { smartSyncStatus: null }), 2000);
+    if (!sourcePlaying) {
+      store.set('ui', { smartSyncActive: null, smartSyncStatus: `Loaded to Deck ${targetId} · ${reasonText}` });
+      setTimeout(() => store.set('ui', { smartSyncStatus: null }), 3000);
+      return;
     }
+
+    const sIdx = deckId === 'A' ? 0 : 1;
+    const bpm = sourceDeck.track?.bpm || 120;
+
+    // ── Dynamic mix duration based on compatibility ──────────────────────
+    const compat = (harmScore + bpmScore + energyScore) / 300;
+    let bars = Math.max(4, Math.min(16, Math.round(4 + 12 * compat)));
+
+    // Cap by source remaining time (need 5s buffer)
+    const sourceLibTrack2 = library.tracks.find(t => t.id === sourceDeck.track.id);
+    const sourceOutroStart = sourceLibTrack2?.outroStartSec ?? sourceDeck.track.durationSec;
+    const remainingSec = sourceDeck.track.durationSec - audio.deck(deckId).positionSec;
+    const maxBarsByRemaining = Math.floor(((remainingSec - 5) * bpm) / (60 * 4));
+    if (maxBarsByRemaining > 0 && maxBarsByRemaining < bars) bars = Math.max(2, maxBarsByRemaining);
+
+    const crossfadeDuration = (bars * 4 * 60 / bpm) * 1000;
+
+    // ── Outro-aware timing ────────────────────────────────────────────────
+    // Ideally mix should END right around source outroStartSec — so it BEGINS at
+    // (outroStartSec - crossfadeDuration), snapped to the next phrase boundary.
+    const beatSec = 60 / bpm;
+    const phraseSec = 16 * beatSec;
+    const targetMixStartSec = Math.max(0, sourceOutroStart - crossfadeDuration / 1000);
+    const sourcePosNow = audio.deck(deckId).positionSec;
+
+    let secUntilMix;
+    if (sourcePosNow >= targetMixStartSec - phraseSec) {
+      // Already at or near the outro — mix on next phrase boundary
+      const beatsElapsed = (sourcePosNow * bpm) / 60;
+      const beatsIntoPhrase = beatsElapsed % 16;
+      secUntilMix = (16 - beatsIntoPhrase) * beatSec;
+    } else {
+      // Wait until source reaches targetMixStartSec, snapped to phrase
+      const targetBeats = (targetMixStartSec * bpm) / 60;
+      const snappedBeats = Math.round(targetBeats / 16) * 16;
+      const snappedTime = (snappedBeats * 60) / bpm;
+      secUntilMix = Math.max(0.05, snappedTime - sourcePosNow);
+    }
+    const phraseDelayMs = Math.max(50, secUntilMix * 1000);
+
+    const eta = secUntilMix > 8
+      ? `in ${Math.round(secUntilMix)}s`
+      : `next phrase`;
+    store.set('ui', { smartSyncStatus: `${reasonText} · mix ${eta}` });
+
+    // ── Snapshot EQ so we can restore + drive the bass swap ──────────────
+    const sourceLowSnapshot = store.get().mixer.channels[sIdx].eq.low;
+    const targetLowSnapshot = store.get().mixer.channels[tIdx].eq.low;
+
+    const phraseTimer = setTimeout(() => {
+      // Pre-kill incoming bass before its first beat plays
+      restoreEqLow(tIdx, -1);
+
+      audio.deck(targetId).play();
+      store.setIn('decks', tIdx, { isPlaying: true });
+
+      store.set('ui', {
+        smartSyncStatus: `Mixing · ${bars} bars · bass swap`,
+      });
+
+      // First half: ramp incoming low up to its snapshot value
+      const cancelEqUp = animateEqLow(tIdx, -1, targetLowSnapshot, crossfadeDuration / 2);
+
+      // Second half: cut outgoing low from snapshot to kill
+      const cancelEqDown = animateEqLow(sIdx, sourceLowSnapshot, -1, crossfadeDuration / 2, crossfadeDuration / 2);
+
+      // Crossfader runs the full duration
+      const targetCrossfader = targetId === 'A' ? -1 : 1;
+      const cancelXf = animateCrossfader(targetCrossfader, crossfadeDuration);
+
+      // Track for cancel()
+      activeMix = {
+        cancels: [cancelEqUp, cancelEqDown, cancelXf],
+        sIdx, tIdx,
+        sourceLowSnapshot, targetLowSnapshot,
+        finishTimeout: null,
+        sourceId: deckId,
+      };
+
+      activeMix.finishTimeout = setTimeout(() => {
+        audio.deck(deckId).pause();
+        store.setIn('decks', sIdx, { isPlaying: false });
+        // Restore source EQ for next time the deck is played
+        restoreEqLow(sIdx, sourceLowSnapshot);
+        store.set('ui', { smartSyncActive: null, smartSyncStatus: 'Smart mix complete ✓' });
+        setTimeout(() => store.set('ui', { smartSyncStatus: null }), 2000);
+        activeMix = null;
+      }, crossfadeDuration + 200);
+    }, phraseDelayMs);
+
+    // If the user cancels before phrase boundary even fires, kill the timer.
+    activeMix = {
+      cancels: [],
+      sIdx, tIdx,
+      sourceLowSnapshot, targetLowSnapshot,
+      phraseTimer,
+      sourceId: deckId,
+    };
   },
 
-  // Cancel an in-progress auto-mix
+  // Cancel an in-progress auto-mix. Restores EQ snapshots.
   cancel() {
-    if (autoMixTimer) {
-      cancelAnimationFrame(autoMixTimer);
-      autoMixTimer = null;
+    if (!activeMix) {
+      store.set('ui', { smartSyncActive: null, smartSyncStatus: null });
+      return;
     }
-    store.set('ui', { smartSyncActive: null, smartSyncStatus: null });
+    for (const c of activeMix.cancels || []) { try { c(); } catch {} }
+    if (activeMix.finishTimeout) clearTimeout(activeMix.finishTimeout);
+    if (activeMix.phraseTimer) clearTimeout(activeMix.phraseTimer);
+    // Restore EQ values
+    restoreEqLow(activeMix.sIdx, activeMix.sourceLowSnapshot);
+    restoreEqLow(activeMix.tIdx, activeMix.targetLowSnapshot);
+    activeMix = null;
+    store.set('ui', { smartSyncActive: null, smartSyncStatus: 'Smart mix cancelled' });
+    setTimeout(() => store.set('ui', { smartSyncStatus: null }), 1500);
   },
 };
-
-// Async import for actions to avoid circular dependency
-async function getActionsAsync() {
-  const { actions } = await import('../ui/actions.js');
-  return actions;
-}
