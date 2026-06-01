@@ -178,13 +178,15 @@ function animateEqLow(chIdx, from, to, durationMs, delayMs = 0) {
 
 // Animate a channel's color-FX filter from `from` to `to` over `durationMs`.
 // Value: -1 (full LPF cut) → 0 (open) → +1 (full HPF cut).
-function animateFilter(chIdx, from, to, durationMs, delayMs = 0) {
+// Optional ease function (default: ease-in-out quad).
+function animateFilter(chIdx, from, to, durationMs, delayMs = 0, ease) {
+  const easeFn = ease || ((t) => (t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2));
   const startTime = performance.now() + delayMs;
   let raf;
   function tick(now) {
     if (now < startTime) { raf = requestAnimationFrame(tick); return; }
     const t = Math.min(1, (now - startTime) / durationMs);
-    const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    const eased = easeFn(t);
     const v = from + (to - from) * eased;
     audio.bus.setFilter(chIdx, v);
     const channels = [...store.get().mixer.channels];
@@ -195,6 +197,59 @@ function animateFilter(chIdx, from, to, durationMs, delayMs = 0) {
   }
   raf = requestAnimationFrame(tick);
   return () => { if (raf) cancelAnimationFrame(raf); };
+}
+
+// Late-curve ease for filter sweeps that should "rise into" a target moment:
+// stays at start value for first half, then sweeps cubic-ease-out over second half.
+// Calibrated so the filter is mostly closed until ~70% of the animation time,
+// then opens sharply right before the drop arrives.
+function lateRampEase(t) {
+  if (t < 0.5) return 0;
+  const tt = (t - 0.5) * 2;
+  return 1 - Math.pow(1 - tt, 3);
+}
+
+// Animate a channel's mid EQ (vocal band) from `from` to `to`.
+function animateEqMid(chIdx, from, to, durationMs, delayMs = 0) {
+  const startTime = performance.now() + delayMs;
+  let raf;
+  function tick(now) {
+    if (now < startTime) { raf = requestAnimationFrame(tick); return; }
+    const t = Math.min(1, (now - startTime) / durationMs);
+    const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    const v = from + (to - from) * eased;
+    audio.bus.setEq(chIdx, 'mid', v);
+    const channels = [...store.get().mixer.channels];
+    channels[chIdx] = { ...channels[chIdx], eq: { ...channels[chIdx].eq, mid: v } };
+    store.set('mixer', { channels });
+    if (t < 1) raf = requestAnimationFrame(tick);
+    else raf = null;
+  }
+  raf = requestAnimationFrame(tick);
+  return () => { if (raf) cancelAnimationFrame(raf); };
+}
+
+function restoreEqMid(chIdx, value) {
+  audio.bus.setEq(chIdx, 'mid', value);
+  const channels = [...store.get().mixer.channels];
+  channels[chIdx] = { ...channels[chIdx], eq: { ...channels[chIdx].eq, mid: value } };
+  store.set('mixer', { channels });
+}
+
+// Probe whether a track has significant high-band content (vocals / open hats) at a given position.
+// Reads bandedPeaks.highs averaged over a ~4-bucket window around the position.
+function hasVocalAt(libTrack, positionSec) {
+  if (!libTrack || !libTrack.bandedPeaks || !libTrack.durationSec) return false;
+  const highs = libTrack.bandedPeaks.highs;
+  const n = highs.length;
+  if (n === 0) return false;
+  const bucket = Math.floor((positionSec / libTrack.durationSec) * n);
+  const start = Math.max(0, bucket - 4);
+  const end = Math.min(n, bucket + 4);
+  let sum = 0, count = 0;
+  for (let i = start; i < end; i++) { sum += highs[i]; count++; }
+  const avg = sum / (count || 1);
+  return avg > 0.35;
 }
 
 function restoreFilter(chIdx, value) {
@@ -512,29 +567,43 @@ export const smartSync = {
     store.setIn('decks', tIdx, { hotCues: incomingHotCues });
 
     // ── Transition technique selection ────────────────────────────────────
-    // Pick from: quick-cut, bass-swap (default), hpf-lift, lpf-open.
+    // Pick base technique: quick-cut, bass-swap (default), hpf-lift, lpf-open.
     const incomingHasNearDrop = (matchOnLib.firstDropSec || 0) > (matchOnLib.introEndSec || 0) + 4;
     let technique = 'bass-swap';
     if (bars <= 3) {
-      technique = 'quick-cut'; // tight slam, no filter sweeps
+      technique = 'quick-cut';
     } else if (absEnergyDelta > 0.22) {
-      technique = 'hpf-lift';  // big energy shift — outgoing gets thinned out
+      technique = 'hpf-lift';
     } else if (incomingHasNearDrop && bars >= 10 && !isMashup) {
-      technique = 'lpf-open';  // incoming starts muffled, opens as drop arrives
+      technique = 'lpf-open';
     }
+
+    // ── Add-ons: mid kill + echo throw ────────────────────────────────────
+    // Mid kill: if BOTH tracks have vocal content during the mix, suppress
+    // outgoing's mid band in the second half so the vocals don't compete.
+    const srcHasVocals = hasVocalAt(sourceLibTrack2, mixStartInSource + crossfadeDuration / 2000);
+    const tgtHasVocals = hasVocalAt(matchOnLib, incomingStart + crossfadeDuration / 2000);
+    const useMidKill = bars >= 6 && technique !== 'quick-cut' && srcHasVocals && tgtHasVocals;
+
+    // Echo throw: launch a beat-synced ½-beat delay on the outgoing channel
+    // during the last 4 bars so its tail rings out under the new track.
+    const useEchoThrow = bars >= 8 && technique !== 'quick-cut';
 
     // ── Status text ───────────────────────────────────────────────────────
     const etaTxt = secUntilMix > 6 ? `in ${Math.round(secUntilMix)}s` : `next phrase`;
     const loopTxt = sourceLoopApplied ? ` · src loop ${sourceLoopApplied.bars}b` : '';
+    const addonTxt = (useMidKill ? ' · mid kill' : '') + (useEchoThrow ? ' · echo throw' : '');
     const techTxt = ` · ${technique.replace('-', ' ')}`;
     const barsTxt = ` · ${bars}b`;
-    store.set('ui', { smartSyncStatus: `${reasonText}${barsTxt}${techTxt}${loopTxt} · ${etaTxt}` });
+    store.set('ui', { smartSyncStatus: `${reasonText}${barsTxt}${techTxt}${addonTxt}${loopTxt} · ${etaTxt}` });
 
-    // ── Snapshot EQ + filters so we can restore + drive the transition ───
+    // ── Snapshot EQ + filters + beat FX so we can restore + drive the transition
     const sourceLowSnapshot = store.get().mixer.channels[sIdx].eq.low;
     const targetLowSnapshot = store.get().mixer.channels[tIdx].eq.low;
+    const sourceMidSnapshot = store.get().mixer.channels[sIdx].eq.mid;
     const sourceFilterSnapshot = store.get().mixer.channels[sIdx].filter;
     const targetFilterSnapshot = store.get().mixer.channels[tIdx].filter;
+    const beatFxSnapshot = { ...store.get().mixer.beatFx };
 
     const phraseTimer = setTimeout(() => {
       // Apply source loop if needed to keep source body looping during the mix
@@ -582,12 +651,45 @@ export const smartSync = {
 
       if (technique === 'hpf-lift') {
         // Outgoing gets a high-pass sweep that thins it out across the whole mix.
-        // Filter values: +0.8 at end = HPF up around 2-3 kHz (kills everything but air)
         cancels.push(animateFilter(sIdx, sourceFilterSnapshot, 0.8, crossfadeDuration));
       } else if (technique === 'lpf-open') {
-        // Incoming starts muffled (LPF closed) and opens precisely at the midpoint
-        // — pairs with drop-at-midpoint positioning to make the drop "arrive" cinematically.
-        cancels.push(animateFilter(tIdx, -0.9, targetFilterSnapshot, halfDur));
+        // Incoming starts muffled and opens precisely at the drop midpoint.
+        // Late-ramp ease: stays muffled until ~70% of half-duration, then sweeps open.
+        cancels.push(animateFilter(tIdx, -0.9, targetFilterSnapshot, halfDur, 0, lateRampEase));
+      }
+
+      // Add-on: mid kill on outgoing during second half — pulls vocals away
+      if (useMidKill) {
+        cancels.push(animateEqMid(sIdx, sourceMidSnapshot, -0.9, halfDur, halfDur));
+      }
+
+      // Add-on: echo throw — beat-synced ½-beat delay on outgoing channel during
+      // the last 4 bars. Snapshot beat FX, hijack it, restore after.
+      let echoOnTimer = null;
+      let echoOffTimer = null;
+      if (useEchoThrow) {
+        const fourBarsMs = (4 * 4 * 60 / bpm) * 1000;
+        const echoStartMs = Math.max(50, crossfadeDuration - fourBarsMs);
+        echoOnTimer = setTimeout(() => {
+          audio.fx.setType('echo');
+          audio.fx.target = sIdx === 0 ? 'ch1' : 'ch2';
+          audio.fx.setBeatDiv('1/2');
+          audio.fx.setLevel(0.55);
+          audio.fx.setOn(true);
+          store.set('mixer', {
+            beatFx: { type: 'echo', target: sIdx === 0 ? 'ch1' : 'ch2', beatDiv: '1/2', level: 0.55, on: true },
+          });
+        }, echoStartMs);
+        // Let the tail ring for ~2 seconds after mix end, then restore
+        echoOffTimer = setTimeout(() => {
+          audio.fx.setOn(false);
+          audio.fx.setType(beatFxSnapshot.type);
+          audio.fx.target = beatFxSnapshot.target;
+          audio.fx.setBeatDiv(beatFxSnapshot.beatDiv);
+          audio.fx.setLevel(beatFxSnapshot.level);
+          audio.fx.setOn(beatFxSnapshot.on);
+          store.set('mixer', { beatFx: { ...beatFxSnapshot } });
+        }, crossfadeDuration + 2000);
       }
 
       // Crossfader runs the full duration
@@ -598,11 +700,15 @@ export const smartSync = {
         cancels,
         sIdx, tIdx,
         sourceLowSnapshot, targetLowSnapshot,
+        sourceMidSnapshot,
         sourceFilterSnapshot, targetFilterSnapshot,
+        beatFxSnapshot,
+        echoOnTimer, echoOffTimer,
         finishTimeout: null,
         loopReleaseTimer,
         sourceId: deckId,
         technique,
+        useMidKill, useEchoThrow,
       };
 
       activeMix.finishTimeout = setTimeout(() => {
@@ -615,6 +721,7 @@ export const smartSync = {
         store.setIn('decks', sIdx, { isPlaying: false });
         // Restore source EQ + filter for next time the deck is played
         restoreEqLow(sIdx, sourceLowSnapshot);
+        if (useMidKill) restoreEqMid(sIdx, sourceMidSnapshot);
         restoreFilter(sIdx, sourceFilterSnapshot);
         // Restore target filter (lpf-open finished at snapshot but be defensive)
         restoreFilter(tIdx, targetFilterSnapshot);
@@ -644,6 +751,19 @@ export const smartSync = {
     if (activeMix.finishTimeout) clearTimeout(activeMix.finishTimeout);
     if (activeMix.phraseTimer) clearTimeout(activeMix.phraseTimer);
     if (activeMix.loopReleaseTimer) clearTimeout(activeMix.loopReleaseTimer);
+    if (activeMix.echoOnTimer) clearTimeout(activeMix.echoOnTimer);
+    if (activeMix.echoOffTimer) clearTimeout(activeMix.echoOffTimer);
+    // If echo throw was already fired, fully restore beat FX now
+    if (activeMix.beatFxSnapshot) {
+      audio.fx.setOn(false);
+      audio.fx.setType(activeMix.beatFxSnapshot.type);
+      audio.fx.target = activeMix.beatFxSnapshot.target;
+      audio.fx.setBeatDiv(activeMix.beatFxSnapshot.beatDiv);
+      audio.fx.setLevel(activeMix.beatFxSnapshot.level);
+      audio.fx.setOn(activeMix.beatFxSnapshot.on);
+      store.set('mixer', { beatFx: { ...activeMix.beatFxSnapshot } });
+    }
+    if (activeMix.sourceMidSnapshot !== undefined) restoreEqMid(activeMix.sIdx, activeMix.sourceMidSnapshot);
     // Clear source loop if it was applied
     if (activeMix.sourceId) {
       audio.deck(activeMix.sourceId).setLoop(null);
