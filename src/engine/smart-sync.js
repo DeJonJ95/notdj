@@ -114,9 +114,10 @@ function buildReasons({ sourceKey, targetKey, harmDist, sourceBpm, targetBpm, so
     else out.push(`Key mismatch ${camelotStr(sourceKey)} → ${camelotStr(targetKey)}`);
   }
   if (sourceBpm && targetBpm) {
-    const delta = targetBpm - sourceBpm;
-    if (Math.abs(delta) < 0.5) out.push(`Same BPM`);
-    else out.push(`${delta > 0 ? '+' : ''}${delta.toFixed(1)} BPM`);
+    // sourceBpm is effective; targetBpm is candidate natural. Stretch needed = (source - target) / target.
+    const stretchPct = ((sourceBpm - targetBpm) / targetBpm) * 100;
+    if (Math.abs(stretchPct) < 0.5) out.push(`Natural tempo`);
+    else out.push(`${stretchPct > 0 ? '+' : ''}${stretchPct.toFixed(1)}% stretch`);
   }
   const eDelta = (targetEnergy ?? 0.5) - (sourceEnergy ?? 0.5);
   if (Math.abs(eDelta) < 0.08) out.push(`Same energy`);
@@ -297,7 +298,13 @@ export const smartSync = {
     const sourceTrack = sourceDeck?.track;
     if (!sourceTrack || !sourceTrack.bpm) return [];
 
-    const sourceBpm = sourceTrack.bpm;
+    // CRITICAL: use EFFECTIVE BPM (track.bpm × current tempo multiplier).
+    // Otherwise chained mixes accumulate stretch — each pick is matched against the
+    // natural BPM, but playback is at effective, so each new track gets stretched
+    // further from its natural tempo. By song 5 you can be ~5-7% off → time-stretch
+    // artifacts in lows + vocals.
+    const sourceTempo = audio.deck(deckId).tempo || 1;
+    const sourceBpm = sourceTrack.bpm * sourceTempo;
     const sourceKey = parseKey(sourceTrack.key);
     const sourceLibTrack = library.tracks.find(t => t.id === sourceTrack.id);
     const sourceEnergy = sourceLibTrack?.energy ?? 0.5;
@@ -466,7 +473,9 @@ export const smartSync = {
     }
 
     const sIdx = deckId === 'A' ? 0 : 1;
-    const bpm = sourceDeck.track?.bpm || 120;
+    // Effective BPM — what's actually playing. All phrase/mix timing must use this.
+    const sourceTempoNow = audio.deck(deckId).tempo || 1;
+    const bpm = (sourceDeck.track?.bpm || 120) * sourceTempoNow;
     const beatSec = 60 / bpm;
     const phraseSec = 16 * beatSec;
 
@@ -567,7 +576,6 @@ export const smartSync = {
     store.setIn('decks', tIdx, { hotCues: incomingHotCues });
 
     // ── Transition technique selection ────────────────────────────────────
-    // Pick base technique: quick-cut, bass-swap (default), hpf-lift, lpf-open.
     const incomingHasNearDrop = (matchOnLib.firstDropSec || 0) > (matchOnLib.introEndSec || 0) + 4;
     let technique = 'bass-swap';
     if (bars <= 3) {
@@ -578,21 +586,26 @@ export const smartSync = {
       technique = 'lpf-open';
     }
 
-    // ── Add-ons: mid kill + echo throw ────────────────────────────────────
-    // Mid kill: if BOTH tracks have vocal content during the mix, suppress
-    // outgoing's mid band in the second half so the vocals don't compete.
+    // ── Add-ons: mid kill + loop trim + echo throw ───────────────────────
     const srcHasVocals = hasVocalAt(sourceLibTrack2, mixStartInSource + crossfadeDuration / 2000);
     const tgtHasVocals = hasVocalAt(matchOnLib, incomingStart + crossfadeDuration / 2000);
     const useMidKill = bars >= 6 && technique !== 'quick-cut' && srcHasVocals && tgtHasVocals;
 
-    // Echo throw: launch a beat-synced ½-beat delay on the outgoing channel
-    // during the last 4 bars so its tail rings out under the new track.
-    const useEchoThrow = bars >= 8 && technique !== 'quick-cut';
+    // Loop trim: progressive 4→2→1→release loop on source in the last 4 bars.
+    // Pairs naturally with hpf-lift and lpf-open for dramatic build-ups into the new track.
+    const useLoopTrim = bars >= 8 && !isMashup &&
+      (technique === 'lpf-open' || technique === 'hpf-lift' || setIntent === 'build');
+
+    // Echo throw is mutually exclusive with loop trim — both occupy the last 4 bars.
+    // Loop trim is more impactful so it wins when both could apply.
+    const useEchoThrow = bars >= 8 && technique !== 'quick-cut' && !useLoopTrim;
 
     // ── Status text ───────────────────────────────────────────────────────
     const etaTxt = secUntilMix > 6 ? `in ${Math.round(secUntilMix)}s` : `next phrase`;
     const loopTxt = sourceLoopApplied ? ` · src loop ${sourceLoopApplied.bars}b` : '';
-    const addonTxt = (useMidKill ? ' · mid kill' : '') + (useEchoThrow ? ' · echo throw' : '');
+    const addonTxt = (useMidKill ? ' · mid kill' : '') +
+                     (useLoopTrim ? ' · loop trim' : '') +
+                     (useEchoThrow ? ' · echo throw' : '');
     const techTxt = ` · ${technique.replace('-', ' ')}`;
     const barsTxt = ` · ${bars}b`;
     store.set('ui', { smartSyncStatus: `${reasonText}${barsTxt}${techTxt}${addonTxt}${loopTxt} · ${etaTxt}` });
@@ -606,14 +619,45 @@ export const smartSync = {
     const beatFxSnapshot = { ...store.get().mixer.beatFx };
 
     const phraseTimer = setTimeout(() => {
-      // Apply source loop if needed to keep source body looping during the mix
+      // Apply source loop if body would otherwise run out mid-mix
       let loopReleaseTimer = null;
+      let loopTrimTimers = [];
       if (sourceLoopApplied) {
         audio.deck(deckId).setLoop({ startSec: sourceLoopApplied.startSec, endSec: sourceLoopApplied.endSec });
         store.setIn('decks', sIdx, { loop: { ...sourceLoopApplied, active: true } });
+      }
 
-        // Schedule loop release ~4 bars before mix-end so source plays naturally into the final fade.
-        // This lets the outgoing track's natural tail be heard rather than a mid-loop seam.
+      // ── Loop trim build-up — progressively halve the loop in the last 4 bars ─
+      if (useLoopTrim) {
+        const oneBarMs = (4 * 60 / bpm) * 1000;
+        // Schedule of trims. If the body-extension loop is already active we skip
+        // the "establish 4-bar loop" step.
+        const trimSchedule = [];
+        if (!sourceLoopApplied) {
+          trimSchedule.push({ atMs: Math.max(0, crossfadeDuration - 4 * oneBarMs), bars: 4 });
+        }
+        trimSchedule.push({ atMs: Math.max(0, crossfadeDuration - 2 * oneBarMs), bars: 2 });
+        trimSchedule.push({ atMs: Math.max(0, crossfadeDuration - oneBarMs),     bars: 1 });
+        trimSchedule.push({ atMs: Math.max(0, crossfadeDuration - 0.5 * oneBarMs), bars: 0 });  // release
+
+        let trimLoopStart = sourceLoopApplied?.startSec ?? null;
+        for (const trim of trimSchedule) {
+          loopTrimTimers.push(setTimeout(() => {
+            const dp = audio.deck(deckId);
+            if (trim.bars === 0) {
+              dp.setLoop(null);
+              store.setIn('decks', sIdx, { loop: null });
+            } else {
+              if (trimLoopStart === null) trimLoopStart = dp.positionSec;
+              const loopLenSec = trim.bars * 4 * 60 / bpm;
+              const loopEnd = trimLoopStart + loopLenSec;
+              dp.setLoop({ startSec: trimLoopStart, endSec: loopEnd });
+              store.setIn('decks', sIdx, { loop: { startSec: trimLoopStart, endSec: loopEnd, active: true, bars: trim.bars } });
+            }
+          }, trim.atMs));
+        }
+      } else if (sourceLoopApplied) {
+        // No trim — just release the body-extension loop ~4 bars before mix end
         const fourBarsMs = (4 * 4 * 60 / bpm) * 1000;
         const releaseAtMs = Math.max(100, crossfadeDuration - fourBarsMs);
         loopReleaseTimer = setTimeout(() => {
@@ -704,11 +748,12 @@ export const smartSync = {
         sourceFilterSnapshot, targetFilterSnapshot,
         beatFxSnapshot,
         echoOnTimer, echoOffTimer,
+        loopTrimTimers,
         finishTimeout: null,
         loopReleaseTimer,
         sourceId: deckId,
         technique,
-        useMidKill, useEchoThrow,
+        useMidKill, useEchoThrow, useLoopTrim,
       };
 
       activeMix.finishTimeout = setTimeout(() => {
@@ -753,6 +798,7 @@ export const smartSync = {
     if (activeMix.loopReleaseTimer) clearTimeout(activeMix.loopReleaseTimer);
     if (activeMix.echoOnTimer) clearTimeout(activeMix.echoOnTimer);
     if (activeMix.echoOffTimer) clearTimeout(activeMix.echoOffTimer);
+    for (const t of activeMix.loopTrimTimers || []) clearTimeout(t);
     // If echo throw was already fired, fully restore beat FX now
     if (activeMix.beatFxSnapshot) {
       audio.fx.setOn(false);
