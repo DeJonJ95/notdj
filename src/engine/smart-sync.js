@@ -176,6 +176,34 @@ function animateEqLow(chIdx, from, to, durationMs, delayMs = 0) {
   return () => { if (raf) cancelAnimationFrame(raf); };
 }
 
+// Animate a channel's color-FX filter from `from` to `to` over `durationMs`.
+// Value: -1 (full LPF cut) → 0 (open) → +1 (full HPF cut).
+function animateFilter(chIdx, from, to, durationMs, delayMs = 0) {
+  const startTime = performance.now() + delayMs;
+  let raf;
+  function tick(now) {
+    if (now < startTime) { raf = requestAnimationFrame(tick); return; }
+    const t = Math.min(1, (now - startTime) / durationMs);
+    const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    const v = from + (to - from) * eased;
+    audio.bus.setFilter(chIdx, v);
+    const channels = [...store.get().mixer.channels];
+    channels[chIdx] = { ...channels[chIdx], filter: v };
+    store.set('mixer', { channels });
+    if (t < 1) raf = requestAnimationFrame(tick);
+    else raf = null;
+  }
+  raf = requestAnimationFrame(tick);
+  return () => { if (raf) cancelAnimationFrame(raf); };
+}
+
+function restoreFilter(chIdx, value) {
+  audio.bus.setFilter(chIdx, value);
+  const channels = [...store.get().mixer.channels];
+  channels[chIdx] = { ...channels[chIdx], filter: value };
+  store.set('mixer', { channels });
+}
+
 // Wait until the next phrase boundary then fire callback.
 function waitForPhrase(deckId, callback, { bars = 4 } = {}) {
   const dp = audio.deck(deckId);
@@ -387,11 +415,27 @@ export const smartSync = {
     const beatSec = 60 / bpm;
     const phraseSec = 16 * beatSec;
 
-    // ── Dynamic mix duration based on compatibility ──────────────────────
-    const compat = (harmScore + bpmScore + energyScore) / 300;
-    let bars = Math.max(4, Math.min(16, Math.round(4 + 12 * compat)));
+    // ── Dynamic mix duration based on compatibility + energy + intent ────
     const sourceLibTrack2 = library.tracks.find(t => t.id === sourceDeck.track.id);
     const sourceOutroStart = sourceLibTrack2?.outroStartSec ?? sourceDeck.track.durationSec;
+
+    const compat = (harmScore + bpmScore + energyScore) / 300;
+    let bars = Math.max(4, Math.min(16, Math.round(4 + 12 * compat)));
+
+    // Energy delta: big shifts deserve short mixes (long fades expose the gap)
+    const sourceEnergyVal = sourceLibTrack2?.energy ?? 0.5;
+    const targetEnergyVal = matchOnLib.energy ?? 0.5;
+    const energyDelta = targetEnergyVal - sourceEnergyVal;
+    const absEnergyDelta = Math.abs(energyDelta);
+    if (absEnergyDelta > 0.3) bars = Math.min(bars, 4);
+    else if (absEnergyDelta > 0.2) bars = Math.min(bars, 8);
+
+    // Intent pulling against natural energy flow = shorter (don't drag through a mood shift)
+    const setIntent = store.get().ui.setIntent || 'sustain';
+    if (setIntent === 'build' && energyDelta > 0.15) bars = Math.min(bars, 10);
+    if (setIntent === 'cooldown' && energyDelta < -0.15) bars = Math.min(bars, 10);
+    // Mashups stay long
+    if (isMashup) bars = Math.max(bars, 8);
 
     // ── "Mix now" timing — next phrase boundary from current source position ─
     const sourcePosNow = audio.deck(deckId).positionSec;
@@ -467,15 +511,30 @@ export const smartSync = {
     }
     store.setIn('decks', tIdx, { hotCues: incomingHotCues });
 
+    // ── Transition technique selection ────────────────────────────────────
+    // Pick from: quick-cut, bass-swap (default), hpf-lift, lpf-open.
+    const incomingHasNearDrop = (matchOnLib.firstDropSec || 0) > (matchOnLib.introEndSec || 0) + 4;
+    let technique = 'bass-swap';
+    if (bars <= 3) {
+      technique = 'quick-cut'; // tight slam, no filter sweeps
+    } else if (absEnergyDelta > 0.22) {
+      technique = 'hpf-lift';  // big energy shift — outgoing gets thinned out
+    } else if (incomingHasNearDrop && bars >= 10 && !isMashup) {
+      technique = 'lpf-open';  // incoming starts muffled, opens as drop arrives
+    }
+
     // ── Status text ───────────────────────────────────────────────────────
     const etaTxt = secUntilMix > 6 ? `in ${Math.round(secUntilMix)}s` : `next phrase`;
     const loopTxt = sourceLoopApplied ? ` · src loop ${sourceLoopApplied.bars}b` : '';
-    const barsTxt = ` · ${bars}b mix`;
-    store.set('ui', { smartSyncStatus: `${reasonText}${barsTxt}${loopTxt} · ${etaTxt}` });
+    const techTxt = ` · ${technique.replace('-', ' ')}`;
+    const barsTxt = ` · ${bars}b`;
+    store.set('ui', { smartSyncStatus: `${reasonText}${barsTxt}${techTxt}${loopTxt} · ${etaTxt}` });
 
-    // ── Snapshot EQ so we can restore + drive the bass swap ──────────────
+    // ── Snapshot EQ + filters so we can restore + drive the transition ───
     const sourceLowSnapshot = store.get().mixer.channels[sIdx].eq.low;
     const targetLowSnapshot = store.get().mixer.channels[tIdx].eq.low;
+    const sourceFilterSnapshot = store.get().mixer.channels[sIdx].filter;
+    const targetFilterSnapshot = store.get().mixer.channels[tIdx].filter;
 
     const phraseTimer = setTimeout(() => {
       // Apply source loop if needed to keep source body looping during the mix
@@ -494,35 +553,56 @@ export const smartSync = {
         }, releaseAtMs);
       }
 
-      // Pre-kill incoming bass before its first beat plays
-      restoreEqLow(tIdx, -1);
+      // Pre-kill incoming bass before its first beat plays (except for quick-cut)
+      if (technique !== 'quick-cut') restoreEqLow(tIdx, -1);
+      if (technique === 'lpf-open') restoreFilter(tIdx, -0.9); // start muffled
 
       audio.deck(targetId).play();
       store.setIn('decks', tIdx, { isPlaying: true });
 
       const loopMsg = sourceLoopApplied ? ` · src looped ${sourceLoopApplied.bars}b → release` : '';
       store.set('ui', {
-        smartSyncStatus: `Mixing · ${bars} bars · bass swap${loopMsg}`,
+        smartSyncStatus: `Mixing · ${bars}b · ${technique.replace('-', ' ')}${loopMsg}`,
       });
 
-      // First half: ramp incoming low up to its snapshot value
-      const cancelEqUp = animateEqLow(tIdx, -1, targetLowSnapshot, crossfadeDuration / 2);
+      // ── Animation set per technique ─────────────────────────────────────
+      const cancels = [];
+      const halfDur = crossfadeDuration / 2;
 
-      // Second half: cut outgoing low from snapshot to kill
-      const cancelEqDown = animateEqLow(sIdx, sourceLowSnapshot, -1, crossfadeDuration / 2, crossfadeDuration / 2);
+      if (technique === 'quick-cut') {
+        // Snappy: just crossfade, no slow EQ ride. Bass swap compressed into 1 bar at midpoint.
+        const oneBar = (4 * 60 / bpm) * 1000;
+        cancels.push(animateEqLow(tIdx, targetLowSnapshot, targetLowSnapshot, oneBar)); // no-op for symmetry
+        cancels.push(animateEqLow(sIdx, sourceLowSnapshot, -1, oneBar, crossfadeDuration - oneBar));
+      } else {
+        // Default bass swap (applies to bass-swap, hpf-lift, lpf-open)
+        cancels.push(animateEqLow(tIdx, -1, targetLowSnapshot, halfDur));
+        cancels.push(animateEqLow(sIdx, sourceLowSnapshot, -1, halfDur, halfDur));
+      }
+
+      if (technique === 'hpf-lift') {
+        // Outgoing gets a high-pass sweep that thins it out across the whole mix.
+        // Filter values: +0.8 at end = HPF up around 2-3 kHz (kills everything but air)
+        cancels.push(animateFilter(sIdx, sourceFilterSnapshot, 0.8, crossfadeDuration));
+      } else if (technique === 'lpf-open') {
+        // Incoming starts muffled (LPF closed) and opens precisely at the midpoint
+        // — pairs with drop-at-midpoint positioning to make the drop "arrive" cinematically.
+        cancels.push(animateFilter(tIdx, -0.9, targetFilterSnapshot, halfDur));
+      }
 
       // Crossfader runs the full duration
       const targetCrossfader = targetId === 'A' ? -1 : 1;
-      const cancelXf = animateCrossfader(targetCrossfader, crossfadeDuration);
+      cancels.push(animateCrossfader(targetCrossfader, crossfadeDuration));
 
-      // Track for cancel()
       activeMix = {
-        cancels: [cancelEqUp, cancelEqDown, cancelXf],
+        cancels,
         sIdx, tIdx,
         sourceLowSnapshot, targetLowSnapshot,
+        sourceFilterSnapshot, targetFilterSnapshot,
         finishTimeout: null,
         loopReleaseTimer,
         sourceId: deckId,
+        technique,
       };
 
       activeMix.finishTimeout = setTimeout(() => {
@@ -533,8 +613,11 @@ export const smartSync = {
         }
         audio.deck(deckId).pause();
         store.setIn('decks', sIdx, { isPlaying: false });
-        // Restore source EQ for next time the deck is played
+        // Restore source EQ + filter for next time the deck is played
         restoreEqLow(sIdx, sourceLowSnapshot);
+        restoreFilter(sIdx, sourceFilterSnapshot);
+        // Restore target filter (lpf-open finished at snapshot but be defensive)
+        restoreFilter(tIdx, targetFilterSnapshot);
         store.set('ui', { smartSyncActive: null, smartSyncStatus: 'Smart mix complete ✓' });
         setTimeout(() => store.set('ui', { smartSyncStatus: null }), 2000);
         activeMix = null;
@@ -566,9 +649,11 @@ export const smartSync = {
       audio.deck(activeMix.sourceId).setLoop(null);
       store.setIn('decks', activeMix.sIdx, { loop: null });
     }
-    // Restore EQ values
+    // Restore EQ + filter values
     restoreEqLow(activeMix.sIdx, activeMix.sourceLowSnapshot);
     restoreEqLow(activeMix.tIdx, activeMix.targetLowSnapshot);
+    if (activeMix.sourceFilterSnapshot !== undefined) restoreFilter(activeMix.sIdx, activeMix.sourceFilterSnapshot);
+    if (activeMix.targetFilterSnapshot !== undefined) restoreFilter(activeMix.tIdx, activeMix.targetFilterSnapshot);
     activeMix = null;
     store.set('ui', { smartSyncActive: null, smartSyncStatus: 'Smart mix cancelled' });
     setTimeout(() => store.set('ui', { smartSyncStatus: null }), 1500);
