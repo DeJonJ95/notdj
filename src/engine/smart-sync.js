@@ -509,27 +509,14 @@ export const smartSync = {
     const phraseDelayMs = Math.max(50, secUntilMix * 1000);
     const mixStartInSource = sourcePosNow + secUntilMix;
 
-    // ── Source loop extension ─────────────────────────────────────────────
-    // If the mix would run past the source's body section, set a 4-bar beat
-    // loop on source so the body keeps repeating until the mix completes.
-    let sourceLoopApplied = null;
+    // ── Cap mix duration by available body ────────────────────────────────
+    // The groove loop will hold the source body if it has the room. If even a
+    // 2-bar loop won't fit, shrink the mix so it ends before outro.
     const crossfadeDurationNoLoop = (bars * 4 * 60 / bpm) * 1000;
     const mixEndInSource = mixStartInSource + crossfadeDurationNoLoop / 1000;
-    const bodyHeadroom = sourceOutroStart - mixEndInSource;
-
-    if (bodyHeadroom < 0 && sourcePosNow < sourceOutroStart - phraseSec) {
-      // Source body would run out mid-mix. Loop a 4-bar section right at the mix start.
-      const loopBars = 4;
-      const loopLength = loopBars * 4 * beatSec;
-      const loopStart = mixStartInSource;
-      const loopEnd = Math.min(loopStart + loopLength, sourceOutroStart);
-      if (loopEnd - loopStart >= 2 * beatSec) {
-        sourceLoopApplied = { startSec: loopStart, endSec: loopEnd, bars: loopBars };
-      } else {
-        // Not enough body left to loop — shrink mix duration instead
-        const safeBars = Math.max(2, Math.floor((sourceOutroStart - mixStartInSource - 2) / (4 * beatSec)));
-        bars = Math.min(bars, safeBars);
-      }
+    if (mixEndInSource > sourceOutroStart && (sourceOutroStart - mixStartInSource) < 8 * beatSec) {
+      const safeBars = Math.max(2, Math.floor((sourceOutroStart - mixStartInSource - 2) / (4 * beatSec)));
+      bars = Math.min(bars, safeBars);
     }
 
     const crossfadeDuration = (bars * 4 * 60 / bpm) * 1000;
@@ -586,25 +573,42 @@ export const smartSync = {
       technique = 'lpf-open';
     }
 
-    // ── Add-ons: mid kill + loop trim + echo throw ───────────────────────
+    // ── Add-ons (rare, only when context truly calls for them) ───────────
     const srcHasVocals = hasVocalAt(sourceLibTrack2, mixStartInSource + crossfadeDuration / 2000);
     const tgtHasVocals = hasVocalAt(matchOnLib, incomingStart + crossfadeDuration / 2000);
-    const useMidKill = bars >= 6 && technique !== 'quick-cut' && srcHasVocals && tgtHasVocals;
 
-    // Loop trim: progressive 4→2→1→release loop on source in the last 4 bars.
-    // Pairs naturally with hpf-lift and lpf-open for dramatic build-ups into the new track.
-    const useLoopTrim = bars >= 8 && !isMashup &&
-      (technique === 'lpf-open' || technique === 'hpf-lift' || setIntent === 'build');
+    // Mid kill: only with smooth bass-swap technique (hpf-lift already kills mids).
+    // Requires both tracks to have vocals AND a long-enough mix to ride.
+    const useMidKill = bars >= 8 && technique === 'bass-swap' && srcHasVocals && tgtHasVocals;
 
-    // Echo throw is mutually exclusive with loop trim — both occupy the last 4 bars.
-    // Loop trim is more impactful so it wins when both could apply.
-    const useEchoThrow = bars >= 8 && technique !== 'quick-cut' && !useLoopTrim;
+    // Echo throw: rare — only when intent is BUILD and mix is long.
+    const useEchoThrow = bars >= 12 && technique !== 'quick-cut' && setIntent === 'build';
+
+    // ── Groove hold loop — AUDIBLE 4-bar loop on source during the FIRST HALF ─
+    // The old "loop trim at end" was inaudible because source was already faded.
+    // This version applies the loop at mix START when source is full volume,
+    // creating a "holding pattern" feel while incoming builds. Releases as the
+    // bass swap kicks in.
+    const useGrooveLoop = bars >= 6 && !isMashup && technique !== 'quick-cut';
+    let grooveLoop = null;
+    if (useGrooveLoop) {
+      const beatSecLocal = 60 / bpm;
+      const grooveStart = mixStartInSource;
+      const availableSec = sourceOutroStart - grooveStart;
+      const grooveBars = availableSec >= 16 * beatSecLocal ? 4 : (availableSec >= 8 * beatSecLocal ? 2 : 0);
+      if (grooveBars >= 2) {
+        grooveLoop = {
+          startSec: grooveStart,
+          endSec: grooveStart + grooveBars * 4 * beatSecLocal,
+          bars: grooveBars,
+        };
+      }
+    }
 
     // ── Status text ───────────────────────────────────────────────────────
     const etaTxt = secUntilMix > 6 ? `in ${Math.round(secUntilMix)}s` : `next phrase`;
-    const loopTxt = sourceLoopApplied ? ` · src loop ${sourceLoopApplied.bars}b` : '';
+    const loopTxt = grooveLoop ? ` · ${grooveLoop.bars}b loop` : '';
     const addonTxt = (useMidKill ? ' · mid kill' : '') +
-                     (useLoopTrim ? ' · loop trim' : '') +
                      (useEchoThrow ? ' · echo throw' : '');
     const techTxt = ` · ${technique.replace('-', ' ')}`;
     const barsTxt = ` · ${bars}b`;
@@ -619,61 +623,35 @@ export const smartSync = {
     const beatFxSnapshot = { ...store.get().mixer.beatFx };
 
     const phraseTimer = setTimeout(() => {
-      // Apply source loop if body would otherwise run out mid-mix
+      // ── Groove loop: AUDIBLE 4-bar source loop, applied at mix start,
+      //    released at ~75% so source plays naturally into the final fade.
       let loopReleaseTimer = null;
-      let loopTrimTimers = [];
-      if (sourceLoopApplied) {
-        audio.deck(deckId).setLoop({ startSec: sourceLoopApplied.startSec, endSec: sourceLoopApplied.endSec });
-        store.setIn('decks', sIdx, { loop: { ...sourceLoopApplied, active: true } });
-      }
+      if (grooveLoop) {
+        audio.deck(deckId).setLoop({ startSec: grooveLoop.startSec, endSec: grooveLoop.endSec });
+        store.setIn('decks', sIdx, { loop: { ...grooveLoop, active: true } });
 
-      // ── Loop trim build-up — progressively halve the loop in the last 4 bars ─
-      if (useLoopTrim) {
-        const oneBarMs = (4 * 60 / bpm) * 1000;
-        // Schedule of trims. If the body-extension loop is already active we skip
-        // the "establish 4-bar loop" step.
-        const trimSchedule = [];
-        if (!sourceLoopApplied) {
-          trimSchedule.push({ atMs: Math.max(0, crossfadeDuration - 4 * oneBarMs), bars: 4 });
-        }
-        trimSchedule.push({ atMs: Math.max(0, crossfadeDuration - 2 * oneBarMs), bars: 2 });
-        trimSchedule.push({ atMs: Math.max(0, crossfadeDuration - oneBarMs),     bars: 1 });
-        trimSchedule.push({ atMs: Math.max(0, crossfadeDuration - 0.5 * oneBarMs), bars: 0 });  // release
-
-        let trimLoopStart = sourceLoopApplied?.startSec ?? null;
-        for (const trim of trimSchedule) {
-          loopTrimTimers.push(setTimeout(() => {
-            const dp = audio.deck(deckId);
-            if (trim.bars === 0) {
-              dp.setLoop(null);
-              store.setIn('decks', sIdx, { loop: null });
-            } else {
-              if (trimLoopStart === null) trimLoopStart = dp.positionSec;
-              const loopLenSec = trim.bars * 4 * 60 / bpm;
-              const loopEnd = trimLoopStart + loopLenSec;
-              dp.setLoop({ startSec: trimLoopStart, endSec: loopEnd });
-              store.setIn('decks', sIdx, { loop: { startSec: trimLoopStart, endSec: loopEnd, active: true, bars: trim.bars } });
-            }
-          }, trim.atMs));
-        }
-      } else if (sourceLoopApplied) {
-        // No trim — just release the body-extension loop ~4 bars before mix end
         const fourBarsMs = (4 * 4 * 60 / bpm) * 1000;
-        const releaseAtMs = Math.max(100, crossfadeDuration - fourBarsMs);
+        const releaseAtMs = Math.max(crossfadeDuration / 2, crossfadeDuration - fourBarsMs);
         loopReleaseTimer = setTimeout(() => {
           audio.deck(deckId).setLoop(null);
           store.setIn('decks', sIdx, { loop: null });
         }, releaseAtMs);
       }
 
+      // Tuning constants — chosen so transitions are clear but not jarring.
+      const BASS_KILL = -0.6;     // ~-15dB cut on lows (audible reduction, not full kill)
+      const HPF_LIFT_MAX = 0.4;   // ~640Hz HPF — thins lows, keeps presence
+      const LPF_OPEN_START = -0.7;// ~640Hz LPF — "underwater" but not extreme
+      const MID_KILL = -0.4;      // ~-10dB cut on mids — suppress vocals, not silence
+
       // Pre-kill incoming bass before its first beat plays (except for quick-cut)
-      if (technique !== 'quick-cut') restoreEqLow(tIdx, -1);
-      if (technique === 'lpf-open') restoreFilter(tIdx, -0.9); // start muffled
+      if (technique !== 'quick-cut') restoreEqLow(tIdx, BASS_KILL);
+      if (technique === 'lpf-open') restoreFilter(tIdx, LPF_OPEN_START); // start muffled
 
       audio.deck(targetId).play();
       store.setIn('decks', tIdx, { isPlaying: true });
 
-      const loopMsg = sourceLoopApplied ? ` · src looped ${sourceLoopApplied.bars}b → release` : '';
+      const loopMsg = grooveLoop ? ` · ${grooveLoop.bars}b loop` : '';
       store.set('ui', {
         smartSyncStatus: `Mixing · ${bars}b · ${technique.replace('-', ' ')}${loopMsg}`,
       });
@@ -686,25 +664,24 @@ export const smartSync = {
         // Snappy: just crossfade, no slow EQ ride. Bass swap compressed into 1 bar at midpoint.
         const oneBar = (4 * 60 / bpm) * 1000;
         cancels.push(animateEqLow(tIdx, targetLowSnapshot, targetLowSnapshot, oneBar)); // no-op for symmetry
-        cancels.push(animateEqLow(sIdx, sourceLowSnapshot, -1, oneBar, crossfadeDuration - oneBar));
+        cancels.push(animateEqLow(sIdx, sourceLowSnapshot, BASS_KILL, oneBar, crossfadeDuration - oneBar));
       } else {
         // Default bass swap (applies to bass-swap, hpf-lift, lpf-open)
-        cancels.push(animateEqLow(tIdx, -1, targetLowSnapshot, halfDur));
-        cancels.push(animateEqLow(sIdx, sourceLowSnapshot, -1, halfDur, halfDur));
+        cancels.push(animateEqLow(tIdx, BASS_KILL, targetLowSnapshot, halfDur));
+        cancels.push(animateEqLow(sIdx, sourceLowSnapshot, BASS_KILL, halfDur, halfDur));
       }
 
       if (technique === 'hpf-lift') {
-        // Outgoing gets a high-pass sweep that thins it out across the whole mix.
-        cancels.push(animateFilter(sIdx, sourceFilterSnapshot, 0.8, crossfadeDuration));
+        // Outgoing gets a high-pass sweep that thins it out across the mix.
+        cancels.push(animateFilter(sIdx, sourceFilterSnapshot, HPF_LIFT_MAX, crossfadeDuration));
       } else if (technique === 'lpf-open') {
         // Incoming starts muffled and opens precisely at the drop midpoint.
-        // Late-ramp ease: stays muffled until ~70% of half-duration, then sweeps open.
-        cancels.push(animateFilter(tIdx, -0.9, targetFilterSnapshot, halfDur, 0, lateRampEase));
+        cancels.push(animateFilter(tIdx, LPF_OPEN_START, targetFilterSnapshot, halfDur, 0, lateRampEase));
       }
 
-      // Add-on: mid kill on outgoing during second half — pulls vocals away
+      // Add-on: gentle mid attenuation on outgoing during second half — pulls vocals away
       if (useMidKill) {
-        cancels.push(animateEqMid(sIdx, sourceMidSnapshot, -0.9, halfDur, halfDur));
+        cancels.push(animateEqMid(sIdx, sourceMidSnapshot, MID_KILL, halfDur, halfDur));
       }
 
       // Add-on: echo throw — beat-synced ½-beat delay on outgoing channel during
@@ -748,20 +725,17 @@ export const smartSync = {
         sourceFilterSnapshot, targetFilterSnapshot,
         beatFxSnapshot,
         echoOnTimer, echoOffTimer,
-        loopTrimTimers,
         finishTimeout: null,
         loopReleaseTimer,
         sourceId: deckId,
         technique,
-        useMidKill, useEchoThrow, useLoopTrim,
+        useMidKill, useEchoThrow, useGrooveLoop,
       };
 
       activeMix.finishTimeout = setTimeout(() => {
-        // Clear source loop if we had one
-        if (sourceLoopApplied) {
-          audio.deck(deckId).setLoop(null);
-          store.setIn('decks', sIdx, { loop: null });
-        }
+        // Defensive: clear any lingering source loop
+        audio.deck(deckId).setLoop(null);
+        store.setIn('decks', sIdx, { loop: null });
         audio.deck(deckId).pause();
         store.setIn('decks', sIdx, { isPlaying: false });
         // Restore source EQ + filter for next time the deck is played
@@ -798,7 +772,6 @@ export const smartSync = {
     if (activeMix.loopReleaseTimer) clearTimeout(activeMix.loopReleaseTimer);
     if (activeMix.echoOnTimer) clearTimeout(activeMix.echoOnTimer);
     if (activeMix.echoOffTimer) clearTimeout(activeMix.echoOffTimer);
-    for (const t of activeMix.loopTrimTimers || []) clearTimeout(t);
     // If echo throw was already fired, fully restore beat FX now
     if (activeMix.beatFxSnapshot) {
       audio.fx.setOn(false);
