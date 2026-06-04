@@ -156,7 +156,7 @@ function mixdown(buffer) {
 
 // Detect track category from title or filename.
 // Returns 'acapella', 'instrumental', or 'full' (default).
-function detectCategory(title, filename) {
+export function detectCategory(title, filename) {
   const text = `${title || ''} ${filename || ''}`.toLowerCase();
   // Check acapella variants first so an "Instrumental Acapella" oddity still gets classified
   if (/\bacapella\b|\ba cappella\b/i.test(text)) return 'acapella';
