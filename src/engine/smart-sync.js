@@ -237,6 +237,87 @@ function restoreEqMid(chIdx, value) {
   store.set('mixer', { channels });
 }
 
+// Animate a channel's high EQ from `from` to `to`. Used by high-kill finisher.
+function animateEqHigh(chIdx, from, to, durationMs, delayMs = 0) {
+  const startTime = performance.now() + delayMs;
+  let raf;
+  function tick(now) {
+    if (now < startTime) { raf = requestAnimationFrame(tick); return; }
+    const t = Math.min(1, (now - startTime) / durationMs);
+    const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    const v = from + (to - from) * eased;
+    audio.bus.setEq(chIdx, 'high', v);
+    const channels = [...store.get().mixer.channels];
+    channels[chIdx] = { ...channels[chIdx], eq: { ...channels[chIdx].eq, high: v } };
+    store.set('mixer', { channels });
+    if (t < 1) raf = requestAnimationFrame(tick);
+    else raf = null;
+  }
+  raf = requestAnimationFrame(tick);
+  return () => { if (raf) cancelAnimationFrame(raf); };
+}
+
+function restoreEqHigh(chIdx, value) {
+  audio.bus.setEq(chIdx, 'high', value);
+  const channels = [...store.get().mixer.channels];
+  channels[chIdx] = { ...channels[chIdx], eq: { ...channels[chIdx].eq, high: value } };
+  store.set('mixer', { channels });
+}
+
+// ── Finisher rotation ──────────────────────────────────────────────────────
+//
+// Five outgoing-tail techniques that get rotated across mixes so no single one
+// becomes repetitive. A short "recent" memory blocks anything used in the last
+// few mixes from being picked again.
+
+const RECENT_FINISHERS_CAP = 3;
+const recentFinishers = [];
+
+function pickFinisher({ bars, technique, setIntent, incomingHasNearDrop }) {
+  if (bars < 8 || technique === 'quick-cut') return 'none';
+
+  // Base pool — every long mix has at least these to choose from
+  let pool = ['echo', 'reverb', 'high-kill', 'none', 'none'];
+
+  // filter-fade conflicts with techniques that already sweep the color filter
+  if (technique === 'bass-swap') pool.push('filter-fade', 'filter-fade');
+
+  // Context biases (push extra copies = increase probability)
+  if (setIntent === 'build') pool.push('echo', 'filter-fade');
+  if (setIntent === 'cooldown') pool.push('reverb', 'high-kill');
+  if (incomingHasNearDrop && bars >= 12) pool.push('echo');
+
+  // Exclude finishers used in the last 3 mixes for variety
+  let available = pool.filter((f) => !recentFinishers.includes(f));
+  if (available.length === 0) available = pool;
+
+  const picked = available[Math.floor(Math.random() * available.length)];
+  recentFinishers.unshift(picked);
+  if (recentFinishers.length > RECENT_FINISHERS_CAP) recentFinishers.pop();
+  return picked;
+}
+
+function applyBeatFxThrow(type, sIdx, level, snapshot) {
+  audio.fx.setType(type);
+  audio.fx.target = sIdx === 0 ? 'ch1' : 'ch2';
+  audio.fx.setBeatDiv('1/2');
+  audio.fx.setLevel(level);
+  audio.fx.setOn(true);
+  store.set('mixer', {
+    beatFx: { type, target: sIdx === 0 ? 'ch1' : 'ch2', beatDiv: '1/2', level, on: true },
+  });
+}
+
+function restoreBeatFx(snapshot) {
+  audio.fx.setOn(false);
+  audio.fx.setType(snapshot.type);
+  audio.fx.target = snapshot.target;
+  audio.fx.setBeatDiv(snapshot.beatDiv);
+  audio.fx.setLevel(snapshot.level);
+  audio.fx.setOn(snapshot.on);
+  store.set('mixer', { beatFx: { ...snapshot } });
+}
+
 // Probe whether a track has significant high-band content (vocals / open hats) at a given position.
 // Reads bandedPeaks.highs averaged over a ~4-bucket window around the position.
 function hasVocalAt(libTrack, positionSec) {
@@ -581,8 +662,9 @@ export const smartSync = {
     // Requires both tracks to have vocals AND a long-enough mix to ride.
     const useMidKill = bars >= 8 && technique === 'bass-swap' && srcHasVocals && tgtHasVocals;
 
-    // Echo throw: rare — only when intent is BUILD and mix is long.
-    const useEchoThrow = bars >= 12 && technique !== 'quick-cut' && setIntent === 'build';
+    // Finisher — rotating outgoing-tail technique with recency avoidance.
+    // Possible: 'echo', 'reverb', 'filter-fade', 'high-kill', 'none'
+    const finisher = pickFinisher({ bars, technique, setIntent, incomingHasNearDrop });
 
     // ── Groove hold loop — AUDIBLE during the FIRST HALF of mix ────────
     // 2 bars by default so the wrap is short enough to actually HEAR (4-bar
@@ -612,7 +694,7 @@ export const smartSync = {
     const etaTxt = secUntilMix > 6 ? `in ${Math.round(secUntilMix)}s` : `next phrase`;
     const loopTxt = grooveLoop ? ` · ${grooveLoop.bars}b loop${useGrooveTrim ? '→1b' : ''}` : '';
     const addonTxt = (useMidKill ? ' · mid kill' : '') +
-                     (useEchoThrow ? ' · echo throw' : '');
+                     (finisher !== 'none' ? ` · ${finisher}` : '');
     const techTxt = ` · ${technique.replace('-', ' ')}`;
     const barsTxt = ` · ${bars}b`;
     store.set('ui', { smartSyncStatus: `${reasonText}${barsTxt}${techTxt}${addonTxt}${loopTxt} · ${etaTxt}` });
@@ -701,33 +783,39 @@ export const smartSync = {
         cancels.push(animateEqMid(sIdx, sourceMidSnapshot, MID_KILL, halfDur, halfDur));
       }
 
-      // Add-on: echo throw — beat-synced ½-beat delay on outgoing channel during
-      // the last 4 bars. Snapshot beat FX, hijack it, restore after.
-      let echoOnTimer = null;
-      let echoOffTimer = null;
-      if (useEchoThrow) {
+      // ── Finisher — rotating outgoing-tail effect ──────────────────────
+      // Five techniques that get applied over the last ~4 bars of the mix.
+      // Recency avoidance (pickFinisher) ensures no two mixes in a row feel
+      // the same, even when the base transition technique is identical.
+      let finisherOnTimer = null;
+      let finisherOffTimer = null;
+      if (finisher !== 'none') {
         const fourBarsMs = (4 * 4 * 60 / bpm) * 1000;
-        const echoStartMs = Math.max(50, crossfadeDuration - fourBarsMs);
-        echoOnTimer = setTimeout(() => {
-          audio.fx.setType('echo');
-          audio.fx.target = sIdx === 0 ? 'ch1' : 'ch2';
-          audio.fx.setBeatDiv('1/2');
-          audio.fx.setLevel(0.55);
-          audio.fx.setOn(true);
-          store.set('mixer', {
-            beatFx: { type: 'echo', target: sIdx === 0 ? 'ch1' : 'ch2', beatDiv: '1/2', level: 0.55, on: true },
-          });
-        }, echoStartMs);
-        // Let the tail ring for ~2 seconds after mix end, then restore
-        echoOffTimer = setTimeout(() => {
-          audio.fx.setOn(false);
-          audio.fx.setType(beatFxSnapshot.type);
-          audio.fx.target = beatFxSnapshot.target;
-          audio.fx.setBeatDiv(beatFxSnapshot.beatDiv);
-          audio.fx.setLevel(beatFxSnapshot.level);
-          audio.fx.setOn(beatFxSnapshot.on);
-          store.set('mixer', { beatFx: { ...beatFxSnapshot } });
-        }, crossfadeDuration + 2000);
+        const fxStartMs = Math.max(50, crossfadeDuration - fourBarsMs);
+
+        if (finisher === 'echo' || finisher === 'reverb') {
+          // Beat-synced FX tail on outgoing channel for the last 4 bars
+          finisherOnTimer = setTimeout(() => {
+            applyBeatFxThrow(finisher, sIdx, 0.55, beatFxSnapshot);
+          }, fxStartMs);
+          // Let the tail ring ~2s after mix end, then restore
+          finisherOffTimer = setTimeout(() => {
+            restoreBeatFx(beatFxSnapshot);
+          }, crossfadeDuration + 2000);
+
+        } else if (finisher === 'filter-fade') {
+          // Sweep outgoing channel's colour filter from current to full LPF
+          // over the last 4 bars — rolls the track off like turning a knob.
+          cancels.push(animateFilter(sIdx, sourceFilterSnapshot, -1, fourBarsMs, fxStartMs));
+
+        } else if (finisher === 'high-kill') {
+          // Rapid high EQ sweep on outgoing over last 2 bars — pulls out
+          // hats / sibilance / cymbals so the track thins into the outro.
+          const twoBarsMs = (2 * 4 * 60 / bpm) * 1000;
+          const hKillStartMs = Math.max(50, crossfadeDuration - twoBarsMs);
+          const sourceHighSnapshot = store.get().mixer.channels[sIdx].eq.high;
+          cancels.push(animateEqHigh(sIdx, sourceHighSnapshot, -1, twoBarsMs, hKillStartMs));
+        }
       }
 
       // Crossfader runs the full duration
@@ -738,16 +826,16 @@ export const smartSync = {
         cancels,
         sIdx, tIdx,
         sourceLowSnapshot, targetLowSnapshot,
-        sourceMidSnapshot,
+        sourceMidSnapshot, sourceHighSnapshot: null,
         sourceFilterSnapshot, targetFilterSnapshot,
         beatFxSnapshot,
-        echoOnTimer, echoOffTimer,
+        finisherOnTimer, finisherOffTimer,
         finishTimeout: null,
         loopReleaseTimer,
         loopTrimTimer,
         sourceId: deckId,
         technique,
-        useMidKill, useEchoThrow, useGrooveLoop,
+        useMidKill, finisher, useGrooveLoop,
       };
 
       activeMix.finishTimeout = setTimeout(() => {
@@ -773,8 +861,12 @@ export const smartSync = {
       cancels: [],
       sIdx, tIdx,
       sourceLowSnapshot, targetLowSnapshot,
+      sourceMidSnapshot,
+      sourceFilterSnapshot, targetFilterSnapshot,
+      beatFxSnapshot,
       phraseTimer,
       sourceId: deckId,
+      finisher,
     };
   },
 
@@ -788,20 +880,24 @@ export const smartSync = {
     if (activeMix.finishTimeout) clearTimeout(activeMix.finishTimeout);
     if (activeMix.phraseTimer) clearTimeout(activeMix.phraseTimer);
     if (activeMix.loopReleaseTimer) clearTimeout(activeMix.loopReleaseTimer);
-    if (activeMix.echoOnTimer) clearTimeout(activeMix.echoOnTimer);
-    if (activeMix.echoOffTimer) clearTimeout(activeMix.echoOffTimer);
+    if (activeMix.finisherOnTimer) clearTimeout(activeMix.finisherOnTimer);
+    if (activeMix.finisherOffTimer) clearTimeout(activeMix.finisherOffTimer);
     if (activeMix.loopTrimTimer) clearTimeout(activeMix.loopTrimTimer);
-    // If echo throw was already fired, fully restore beat FX now
-    if (activeMix.beatFxSnapshot) {
-      audio.fx.setOn(false);
-      audio.fx.setType(activeMix.beatFxSnapshot.type);
-      audio.fx.target = activeMix.beatFxSnapshot.target;
-      audio.fx.setBeatDiv(activeMix.beatFxSnapshot.beatDiv);
-      audio.fx.setLevel(activeMix.beatFxSnapshot.level);
-      audio.fx.setOn(activeMix.beatFxSnapshot.on);
-      store.set('mixer', { beatFx: { ...activeMix.beatFxSnapshot } });
+    // If a beat-FX finisher (echo/reverb) was already fired, restore beat FX
+    if (activeMix.finisher === 'echo' || activeMix.finisher === 'reverb') {
+      if (activeMix.beatFxSnapshot) {
+        audio.fx.setOn(false);
+        audio.fx.setType(activeMix.beatFxSnapshot.type);
+        audio.fx.target = activeMix.beatFxSnapshot.target;
+        audio.fx.setBeatDiv(activeMix.beatFxSnapshot.beatDiv);
+        audio.fx.setLevel(activeMix.beatFxSnapshot.level);
+        audio.fx.setOn(activeMix.beatFxSnapshot.on);
+        store.set('mixer', { beatFx: { ...activeMix.beatFxSnapshot } });
+      }
     }
     if (activeMix.sourceMidSnapshot !== undefined) restoreEqMid(activeMix.sIdx, activeMix.sourceMidSnapshot);
+    // Restore high EQ if high-kill finisher was in progress
+    if (activeMix.sourceHighSnapshot !== undefined) restoreEqHigh(activeMix.sIdx, activeMix.sourceHighSnapshot);
     // Clear source loop if it was applied
     if (activeMix.sourceId) {
       audio.deck(activeMix.sourceId).setLoop(null);
