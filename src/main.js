@@ -87,9 +87,11 @@ async function start(e) {
     unlockSrc.start(0);
 
     if (audio.ctx.state === 'suspended') {
-      bootLog('2. resuming context…');
-      await audio.ctx.resume();
-      bootLog('   state=' + audio.ctx.state);
+      bootLog('2. requesting resume (non-blocking)…');
+      // CRITICAL iOS quirk: awaiting resume() can hang indefinitely if a click handler
+      // resolves before the resume promise. Fire and forget; iOS unlocks the context
+      // once the gesture event finishes processing.
+      audio.ctx.resume().then(() => bootLog('   resumed ✓')).catch((e) => bootLog('   resume rejected: ' + e.message));
     } else {
       bootLog('2. context already running');
     }
