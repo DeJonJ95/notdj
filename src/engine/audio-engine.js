@@ -15,9 +15,13 @@ class AudioEngine {
   }
 
   async start() {
-    if (this.ctx) return this.ctx;
-    const Ctx = window.AudioContext || window.webkitAudioContext;
-    this.ctx = new Ctx({ latencyHint: 'interactive' });
+    // If main.js already created the AudioContext synchronously inside a gesture
+    // (required by iOS Safari), just continue and wire everything else.
+    if (this.bus) return this.ctx;
+    if (!this.ctx) {
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      this.ctx = new Ctx({ latencyHint: 'interactive' });
+    }
     if (this.ctx.state === 'suspended') await this.ctx.resume();
 
     this.bus = new MixerBus(this.ctx);
