@@ -42,10 +42,38 @@ function renderTapToStart() {
   boot.addEventListener('pointerdown', start, { once: true });
 }
 
-async function start() {
-  boot.remove();
-  await bootApp(document.getElementById('app'));
+function showFatalError(err) {
+  const stack = (err && (err.stack || err.message || String(err))) || 'unknown';
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;z-index:9999;background:#0d0d10;color:#e8e8ec;padding:24px;font-family:-apple-system,system-ui,monospace;font-size:13px;overflow:auto;-webkit-user-select:text;user-select:text;';
+  overlay.innerHTML = `
+    <div style="color:#ef4444;font-size:16px;font-weight:700;letter-spacing:0.08em;text-transform:uppercase;margin-bottom:12px;">boot failed</div>
+    <div style="color:#7a7a85;font-size:11px;margin-bottom:4px;">User agent</div>
+    <pre style="margin:0 0 16px 0;white-space:pre-wrap;word-break:break-all;">${navigator.userAgent}</pre>
+    <div style="color:#7a7a85;font-size:11px;margin-bottom:4px;">Error</div>
+    <pre style="margin:0;white-space:pre-wrap;word-break:break-word;color:#ff6a1a;">${escape(stack)}</pre>
+    <button onclick="location.reload()" style="margin-top:20px;background:#ff6a1a;border:none;color:#fff;padding:10px 24px;border-radius:8px;font-size:13px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;cursor:pointer;">Reload</button>
+  `;
+  document.body.appendChild(overlay);
 }
+
+function escape(s) {
+  return String(s).replace(/[<>&]/g, (c) => ({ '<': '&lt;', '>': '&gt;', '&': '&amp;' }[c]));
+}
+
+async function start() {
+  try {
+    boot.remove();
+    await bootApp(document.getElementById('app'));
+  } catch (err) {
+    console.error('bootApp failed:', err);
+    showFatalError(err);
+  }
+}
+
+// Global handlers so async exceptions inside bootApp's children still surface
+window.addEventListener('error', (e) => showFatalError(e.error || e.message));
+window.addEventListener('unhandledrejection', (e) => showFatalError(e.reason));
 
 if (authed()) renderTapToStart();
 else renderGate();
