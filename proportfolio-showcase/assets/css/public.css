@@ -1,0 +1,526 @@
+/**
+ * ProPortfolio Showcase — Frontend Styles
+ *
+ * Responsive grid layout, WCAG-compliant colors, theme-agnostic.
+ *
+ * @package ProPortfolio_Showcase
+ */
+
+/* ------------------------------------------------------------------------- */
+/* CSS Custom Properties
+/* ------------------------------------------------------------------------- */
+:root {
+	--proportfolio-primary: #2563eb;
+	--proportfolio-primary-hover: #1d4ed8;
+	--proportfolio-text: #1e293b;
+	--proportfolio-text-light: #64748b;
+	--proportfolio-bg: #ffffff;
+	--proportfolio-bg-card: #ffffff;
+	--proportfolio-border: #e2e8f0;
+	--proportfolio-gap: 1.5rem;
+	--proportfolio-radius: 8px;
+	--proportfolio-shadow: 0 1px 3px rgba(0, 0, 0, 0.08), 0 1px 2px rgba(0, 0, 0, 0.06);
+	--proportfolio-shadow-hover: 0 10px 25px rgba(0, 0, 0, 0.1), 0 4px 10px rgba(0, 0, 0, 0.06);
+	--proportfolio-transition: 200ms ease;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Screen Reader Utility
+/* ------------------------------------------------------------------------- */
+.screen-reader-text {
+	border: 0;
+	clip: rect(1px, 1px, 1px, 1px);
+	-webkit-clip-path: inset(50%);
+	clip-path: inset(50%);
+	height: 1px;
+	margin: -1px;
+	overflow: hidden;
+	padding: 0;
+	position: absolute;
+	width: 1px;
+	word-wrap: normal !important;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Filter Tabs
+/* ------------------------------------------------------------------------- */
+.proportfolio-filter-tabs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	list-style: none;
+	margin: 0 0 1.5rem;
+	padding: 0;
+}
+
+.proportfolio-filter-tabs li {
+	margin: 0;
+}
+
+.proportfolio-filter-tabs button {
+	background: transparent;
+	border: 2px solid var(--proportfolio-border);
+	border-radius: 999px;
+	color: var(--proportfolio-text-light);
+	cursor: pointer;
+	font-size: 0.875rem;
+	font-weight: 500;
+	line-height: 1.5;
+	padding: 0.375rem 1rem;
+	transition: all var(--proportfolio-transition);
+}
+
+.proportfolio-filter-tabs button:hover {
+	border-color: var(--proportfolio-primary);
+	color: var(--proportfolio-primary);
+}
+
+.proportfolio-filter-tabs button:focus-visible {
+	outline: 2px solid var(--proportfolio-primary);
+	outline-offset: 2px;
+}
+
+.proportfolio-filter-tabs .proportfolio-filter-active,
+.proportfolio-filter-tabs button[aria-selected="true"] {
+	background: var(--proportfolio-primary);
+	border-color: var(--proportfolio-primary);
+	color: #ffffff;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Project Grid
+/* ------------------------------------------------------------------------- */
+.proportfolio-grid,
+.proportfolio-archive-grid {
+	display: grid;
+	grid-template-columns: repeat(var(--columns, 3), 1fr);
+	gap: var(--proportfolio-gap);
+	margin-bottom: 2rem;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Project Card
+/* ------------------------------------------------------------------------- */
+.proportfolio-card {
+	background: var(--proportfolio-bg-card);
+	border: 1px solid var(--proportfolio-border);
+	border-radius: var(--proportfolio-radius);
+	box-shadow: var(--proportfolio-shadow);
+	overflow: hidden;
+	transition: box-shadow var(--proportfolio-transition), transform var(--proportfolio-transition);
+}
+
+.proportfolio-card:hover {
+	box-shadow: var(--proportfolio-shadow-hover);
+	transform: translateY(-2px);
+}
+
+.proportfolio-card-link {
+	color: inherit;
+	display: block;
+	text-decoration: none;
+}
+
+.proportfolio-card-link:hover,
+.proportfolio-card-link:focus {
+	color: inherit;
+}
+
+.proportfolio-card-link:focus-visible {
+	outline: 2px solid var(--proportfolio-primary);
+	outline-offset: -2px;
+}
+
+/* Card Image */
+.proportfolio-card-image {
+	margin: 0;
+	overflow: hidden;
+	position: relative;
+}
+
+.proportfolio-card-image img {
+	aspect-ratio: 16 / 10;
+	display: block;
+	height: auto;
+	object-fit: cover;
+	width: 100%;
+}
+
+/* Card Content */
+.proportfolio-card-content {
+	padding: 1rem 1.25rem 1.25rem;
+}
+
+.proportfolio-card-content h2,
+.proportfolio-card-content h3 {
+	font-size: 1.125rem;
+	font-weight: 600;
+	line-height: 1.3;
+	margin: 0 0 0.5rem;
+}
+
+.proportfolio-card-content p {
+	color: var(--proportfolio-text-light);
+	font-size: 0.875rem;
+	line-height: 1.6;
+	margin: 0 0 0.75rem;
+}
+
+/* Card Meta */
+.proportfolio-card-meta {
+	align-items: center;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem 0.75rem;
+	font-size: 0.8125rem;
+	margin-bottom: 0.5rem;
+}
+
+.project-client {
+	color: var(--proportfolio-text-light);
+	font-weight: 500;
+}
+
+.project-date {
+	color: var(--proportfolio-text-light);
+}
+
+/* Technology Tags */
+.project-technologies {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.375rem;
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+.project-technologies li {
+	background: #f1f5f9;
+	border-radius: 4px;
+	color: var(--proportfolio-text);
+	font-size: 0.75rem;
+	font-weight: 500;
+	line-height: 1;
+	padding: 0.25rem 0.5rem;
+	white-space: nowrap;
+}
+
+.project-technologies .tech-more {
+	background: transparent;
+	color: var(--proportfolio-text-light);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Single Project
+/* ------------------------------------------------------------------------- */
+.proportfolio-single-header {
+	margin-bottom: 2rem;
+}
+
+.proportfolio-single-header .entry-title {
+	font-size: 2rem;
+	margin: 0 0 0.75rem;
+}
+
+.proportfolio-meta-bar {
+	align-items: center;
+	color: var(--proportfolio-text-light);
+	display: flex;
+	flex-wrap: wrap;
+	font-size: 0.9375rem;
+	gap: 0.75rem 1.25rem;
+}
+
+.proportfolio-meta-bar a {
+	color: var(--proportfolio-primary);
+	text-decoration: underline;
+}
+
+.proportfolio-meta-bar a:hover {
+	color: var(--proportfolio-primary-hover);
+}
+
+.proportfolio-featured-image {
+	margin: 0 0 1.5rem;
+}
+
+.proportfolio-featured-image img {
+	border-radius: var(--proportfolio-radius);
+	height: auto;
+	max-width: 100%;
+}
+
+.proportfolio-technologies-section {
+	margin-top: 2rem;
+}
+
+.proportfolio-technologies-section h2 {
+	font-size: 1.25rem;
+	margin: 0 0 0.75rem;
+}
+
+.proportfolio-tech-list {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+.proportfolio-tech-list li {
+	background: #f1f5f9;
+	border-radius: var(--proportfolio-radius);
+	font-size: 0.875rem;
+	font-weight: 500;
+	padding: 0.375rem 0.75rem;
+}
+
+/* Testimonial */
+.proportfolio-testimonial {
+	background: #f8fafc;
+	border-left: 4px solid var(--proportfolio-primary);
+	border-radius: 0 var(--proportfolio-radius) var(--proportfolio-radius) 0;
+	margin-top: 2rem;
+	padding: 1.5rem;
+}
+
+.proportfolio-testimonial blockquote {
+	margin: 0;
+}
+
+.proportfolio-testimonial blockquote p {
+	font-size: 1.0625rem;
+	font-style: italic;
+	line-height: 1.7;
+	margin: 0 0 0.5rem;
+}
+
+.proportfolio-testimonial cite {
+	color: var(--proportfolio-text-light);
+	font-size: 0.875rem;
+	font-style: normal;
+}
+
+/* Button */
+.proportfolio-button {
+	background: var(--proportfolio-primary);
+	border-radius: var(--proportfolio-radius);
+	color: #ffffff;
+	display: inline-block;
+	font-size: 0.9375rem;
+	font-weight: 600;
+	padding: 0.625rem 1.5rem;
+	text-decoration: none;
+	transition: background var(--proportfolio-transition);
+}
+
+.proportfolio-button:hover {
+	background: var(--proportfolio-primary-hover);
+	color: #ffffff;
+}
+
+.proportfolio-button:focus-visible {
+	outline: 2px solid var(--proportfolio-primary);
+	outline-offset: 2px;
+}
+
+/* Post Navigation */
+.proportfolio-post-navigation {
+	display: flex;
+	justify-content: space-between;
+	margin-top: 2rem;
+	padding-top: 1.5rem;
+}
+
+.proportfolio-post-navigation a {
+	color: var(--proportfolio-primary);
+	font-weight: 500;
+	text-decoration: none;
+}
+
+.proportfolio-post-navigation a:hover {
+	text-decoration: underline;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Pagination
+/* ------------------------------------------------------------------------- */
+.proportfolio-pagination {
+	margin-top: 2rem;
+	text-align: center;
+}
+
+.proportfolio-pagination .page-numbers {
+	display: inline-flex;
+	gap: 0.25rem;
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+.proportfolio-pagination .page-numbers li {
+	margin: 0;
+}
+
+.proportfolio-pagination a,
+.proportfolio-pagination .current {
+	border: 1px solid var(--proportfolio-border);
+	border-radius: var(--proportfolio-radius);
+	color: var(--proportfolio-text);
+	display: inline-block;
+	font-size: 0.875rem;
+	font-weight: 500;
+	min-width: 2.25rem;
+	padding: 0.375rem 0.625rem;
+	text-align: center;
+	text-decoration: none;
+	transition: all var(--proportfolio-transition);
+}
+
+.proportfolio-pagination a:hover {
+	border-color: var(--proportfolio-primary);
+	color: var(--proportfolio-primary);
+}
+
+.proportfolio-pagination a:focus-visible {
+	outline: 2px solid var(--proportfolio-primary);
+	outline-offset: 2px;
+}
+
+.proportfolio-pagination .current {
+	background: var(--proportfolio-primary);
+	border-color: var(--proportfolio-primary);
+	color: #ffffff;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Widget
+/* ------------------------------------------------------------------------- */
+.proportfolio-widget-list {
+	list-style: none;
+	margin: 0;
+	padding: 0;
+}
+
+.proportfolio-widget-item {
+	border-bottom: 1px solid var(--proportfolio-border);
+	margin: 0;
+	padding: 0.625rem 0;
+}
+
+.proportfolio-widget-item:last-child {
+	border-bottom: none;
+}
+
+.proportfolio-widget-link {
+	align-items: flex-start;
+	color: var(--proportfolio-text);
+	display: flex;
+	gap: 0.75rem;
+	text-decoration: none;
+}
+
+.proportfolio-widget-link:hover {
+	color: var(--proportfolio-primary);
+}
+
+.proportfolio-widget-link:focus-visible {
+	outline: 2px solid var(--proportfolio-primary);
+	outline-offset: 2px;
+}
+
+.proportfolio-widget-thumb {
+	flex-shrink: 0;
+	width: 60px;
+}
+
+.proportfolio-widget-thumb img {
+	border-radius: 4px;
+	display: block;
+	height: auto;
+	width: 100%;
+}
+
+.proportfolio-widget-text {
+	display: flex;
+	flex-direction: column;
+	gap: 0.125rem;
+}
+
+.proportfolio-widget-title {
+	font-size: 0.875rem;
+	font-weight: 600;
+	line-height: 1.3;
+}
+
+.proportfolio-widget-date {
+	color: var(--proportfolio-text-light);
+	font-size: 0.75rem;
+}
+
+/* ------------------------------------------------------------------------- */
+/* No Results
+/* ------------------------------------------------------------------------- */
+.proportfolio-no-results {
+	padding: 2rem 0;
+	text-align: center;
+}
+
+/* ------------------------------------------------------------------------- */
+/* Responsive Breakpoints
+/* ------------------------------------------------------------------------- */
+@media (max-width: 768px) {
+	.proportfolio-grid,
+	.proportfolio-archive-grid {
+		--columns: 2 !important;
+	}
+
+	.proportfolio-card-content {
+		padding: 0.75rem 1rem 1rem;
+	}
+
+	.proportfolio-single-header .entry-title {
+		font-size: 1.5rem;
+	}
+}
+
+@media (max-width: 480px) {
+	.proportfolio-grid,
+	.proportfolio-archive-grid {
+		--columns: 1 !important;
+	}
+
+	.proportfolio-filter-tabs {
+		gap: 0.375rem;
+	}
+
+	.proportfolio-filter-tabs button {
+		font-size: 0.8125rem;
+		padding: 0.25rem 0.75rem;
+	}
+
+	.proportfolio-post-navigation {
+		flex-direction: column;
+		gap: 0.5rem;
+	}
+}
+
+/* ------------------------------------------------------------------------- */
+/* Print
+/* ------------------------------------------------------------------------- */
+@media print {
+	.proportfolio-filter-tabs {
+		display: none;
+	}
+
+	.proportfolio-card {
+		break-inside: avoid;
+		box-shadow: none;
+	}
+
+	.proportfolio-button {
+		display: none;
+	}
+}

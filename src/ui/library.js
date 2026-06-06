@@ -69,7 +69,7 @@ function template() {
       <input class="lib-search" placeholder="Search title, artist, album…" />
       <label class="lib-btn primary" style="cursor:pointer;">
         Import Files
-        <input type="file" accept="audio/*" multiple style="display:none;" id="lib-import" />
+        <input type="file" accept="audio/*,.mp3,.wav,.flac,.m4a,.aac,.ogg,.opus,.aiff,.aif" multiple style="display:none;" id="lib-import" />
       </label>
       <button class="lib-btn" id="lib-import-folder">Import Folder</button>
       <button class="lib-btn close" id="lib-close">Close ✕</button>
