@@ -264,6 +264,27 @@ function restoreEqHigh(chIdx, value) {
   store.set('mixer', { channels });
 }
 
+// Animate a channel's volume fader from `from` to `to` over `durationMs`.
+// Used by the mashup layering mode to fade the overlay track in/out.
+function animateChannelVolume(chIdx, from, to, durationMs, delayMs = 0) {
+  const startTime = performance.now() + delayMs;
+  let raf;
+  function tick(now) {
+    if (now < startTime) { raf = requestAnimationFrame(tick); return; }
+    const t = Math.min(1, (now - startTime) / durationMs);
+    const eased = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+    const v = from + (to - from) * eased;
+    audio.bus.setVolume(chIdx, v);
+    const channels = [...store.get().mixer.channels];
+    channels[chIdx] = { ...channels[chIdx], volume: v };
+    store.set('mixer', { channels });
+    if (t < 1) raf = requestAnimationFrame(tick);
+    else raf = null;
+  }
+  raf = requestAnimationFrame(tick);
+  return () => { if (raf) cancelAnimationFrame(raf); };
+}
+
 // ── Finisher rotation ──────────────────────────────────────────────────────
 //
 // Five outgoing-tail techniques that get rotated across mixes so no single one
@@ -750,6 +771,81 @@ export const smartSync = {
       audio.deck(targetId).play();
       store.setIn('decks', tIdx, { isPlaying: true });
 
+      // ── MASHUP BRANCH: acapella + instrumental layering ───────────────
+      if (isMashup) {
+        // Identify bed (beat provider) vs layer (overlay)
+        // The bed track loops underneath while the layer plays on top.
+        const srcIsAcapella = srcCat === 'acapella';
+        const bedIdx = srcIsAcapella ? tIdx : sIdx;
+        const layerIdx = srcIsAcapella ? sIdx : tIdx;
+        const bedDeckId = srcIsAcapella ? targetId : deckId;
+        const layerDeckId = srcIsAcapella ? deckId : targetId;
+        const fourBarMs = (4 * 4 * 60 / bpm) * 1000;
+
+        // Route layer to Center so it's heard regardless of crossfader position
+        audio.bus.setAssign(layerIdx, 'C');
+        const channels = [...store.get().mixer.channels];
+        channels[layerIdx] = { ...channels[layerIdx], crossfaderAssign: 'C' };
+        store.set('mixer', { channels });
+
+        // Loop the bed deck at its current position (4 bars)
+        const bedPos = audio.deck(bedDeckId).positionSec;
+        const loopEnd = bedPos + 4 * 4 * 60 / bpm;
+        audio.deck(bedDeckId).setLoop({ startSec: bedPos, endSec: loopEnd });
+        store.setIn('decks', bedIdx, { loop: { startSec: bedPos, endSec: loopEnd, active: true, bars: 4 } });
+
+        store.set('ui', {
+          smartSyncStatus: `Mashup · ${srcIsAcapella ? 'instrumental bed' : 'acapella layer'}`,
+        });
+
+        // Fade layer in over 2 bars
+        const cancels = [];
+        cancels.push(animateChannelVolume(layerIdx, 0, 0.75, fourBarMs / 2));
+
+        // Calculate when the layer's usable content ends
+        const layerLibTrack = library.tracks.find(t => t.id === (srcIsAcapella ? sourceTrack.id : matchTrack.id));
+        const layerPosition = srcIsAcapella ? audio.deck(deckId).positionSec : incomingStart;
+        const layerEndSec = (layerLibTrack?.outroStartSec || (layerLibTrack?.durationSec || 300) - 30);
+        const layerRemainingSec = Math.max(8 * 60 / bpm, layerEndSec - layerPosition);
+
+        // Schedule fade-out: animate volume down over 2 bars, ending when layer content is done
+        const totalMs = layerRemainingSec * 1000;
+        const fadeOutStartMs = Math.max(fourBarMs / 2, totalMs - fourBarMs / 2);
+        cancels.push(animateChannelVolume(layerIdx, 0.75, 0, fourBarMs / 2, fadeOutStartMs));
+
+        // Schedule loop release and cleanup after fade-out completes (+ small buffer)
+        const cleanupMs = fadeOutStartMs + fourBarMs / 2 + 200;
+        activeMix = {
+          cancels,
+          sIdx, tIdx, bedIdx, layerIdx, bedDeckId, layerDeckId,
+          // Capture real snapshot values so cancel() restores safely
+          sourceLowSnapshot: store.get().mixer.channels[sIdx].eq.low,
+          targetLowSnapshot: store.get().mixer.channels[tIdx].eq.low,
+          sourceMidSnapshot: store.get().mixer.channels[sIdx].eq.mid,
+          sourceHighSnapshot: store.get().mixer.channels[sIdx].eq.high,
+          sourceFilterSnapshot: store.get().mixer.channels[sIdx].filter,
+          targetFilterSnapshot: store.get().mixer.channels[tIdx].filter,
+          beatFxSnapshot: { ...store.get().mixer.beatFx },
+          finisherOnTimer: null, finisherOffTimer: null,
+          finishTimeout: null,
+          loopReleaseTimer: null,
+          loopTrimTimer: null,
+          sourceId: bedDeckId,
+          technique: 'mashup',
+          useMidKill: false, finisher: 'none', useGrooveLoop: false,
+          isMashup: true,
+        };
+        activeMix.finishTimeout = setTimeout(() => {
+          audio.deck(bedDeckId).setLoop(null);
+          store.setIn('decks', bedIdx, { loop: null });
+          store.set('ui', { smartSyncActive: null, smartSyncStatus: 'Mashup complete ✓' });
+          setTimeout(() => store.set('ui', { smartSyncStatus: null }), 2000);
+          activeMix = null;
+        }, cleanupMs);
+        return; // ← skip the standard bass-swap / finisher / crossfader flow
+      }
+      // ── End mashup branch ──────────────────────────────────────────────
+
       const loopMsg = grooveLoop ? ` · ${grooveLoop.bars}b loop` : '';
       store.set('ui', {
         smartSyncStatus: `Mixing · ${bars}b · ${technique.replace('-', ' ')}${loopMsg}`,
@@ -867,6 +963,7 @@ export const smartSync = {
       phraseTimer,
       sourceId: deckId,
       finisher,
+      isMashup,
     };
   },
 
