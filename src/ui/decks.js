@@ -70,6 +70,15 @@ function drawTrackCard(ctx, layout, state, color, fullState) {
     P.text(ctx, t.artist || '—', m.x, m.y + 32, { color: theme.muted, size: 11 });
     P.text(ctx, t.bpm.toFixed(1), m.x + m.w, m.y + 4, { color, size: 26, weight: 700, align: 'right' });
     P.text(ctx, 'BPM', m.x + m.w, m.y + 32, { color, size: 9, weight: 600, align: 'right' });
+
+    // Category badge (acapella / instrumental)
+    const cat = t.category || 'full';
+    if (cat !== 'full') {
+      const badgeColor = cat === 'acapella' ? theme.deckB : theme.amber;
+      P.text(ctx, cat.toUpperCase(), m.x + m.w - 8, m.y + 44, {
+        color: badgeColor, size: 8, weight: 700, align: 'right',
+      });
+    }
   } else {
     P.text(ctx, 'drop a file to load', m.x, m.y + 18, { color: theme.muted, size: 12 });
   }
