@@ -10,3 +10,6 @@ dist-ssr
 # stray files — keep this repo focused on the DJ controller
 *.zip
 proportfolio-showcase/
+
+# bundled node runtime (not installed system-wide)
+.node/
