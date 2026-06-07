@@ -171,6 +171,7 @@ export class GestureEngine {
     cue: { start: (r) => this.actions.cuePressed(r.deckId), move: () => {}, end: (r) => this.actions.cueReleased(r.deckId) },
     sync: { start: (r) => this.actions.toggleSync(r.deckId), move: () => {} },
     smartSync: { start: (r) => this.actions.smartSync(r.deckId), move: () => {} },
+    mashup: { start: (r) => this.actions.mashup(r.deckId), move: () => {} },
     'xfAssign': { start: (r) => this.actions.setAssign(r.chIdx, r.assign), move: () => {} },
     'cue-toggle': { start: (r) => this.actions.toggleChannelCue(r.chIdx), move: () => {} },
     fxStrip: { start: (r) => this.actions.fxAction(r.deckId, r.action), move: () => {} },
