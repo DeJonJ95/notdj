@@ -17,6 +17,7 @@ self.onmessage = (e) => {
         introEndSec: structure.introEndSec,
         outroStartSec: structure.outroStartSec,
         firstVocalSec: structure.firstVocalSec,
+        firstDropSec: structure.firstDropSec,
       },
       [peaks.buffer, bandedPeaks.lows.buffer, bandedPeaks.mids.buffer, bandedPeaks.highs.buffer]
     );
@@ -55,11 +56,11 @@ function detectFirstBeat(ch, sr) {
   return 0;
 }
 
-// Detect track structure from banded peaks: intro end, outro start, first vocal entry.
+// Detect track structure from banded peaks: intro end, outro start, first vocal entry, first drop.
 // All times are in seconds. Uses smoothed total energy and high-band envelope.
 function detectStructure(banded, durationSec) {
   const n = banded.lows.length;
-  if (n === 0 || !durationSec) return { introEndSec: 0, outroStartSec: durationSec, firstVocalSec: 0 };
+  if (n === 0 || !durationSec) return { introEndSec: 0, outroStartSec: durationSec, firstVocalSec: 0, firstDropSec: 0 };
 
   // Combined energy envelope
   const total = new Float32Array(n);
@@ -87,11 +88,33 @@ function detectStructure(banded, durationSec) {
     if (highsSmoothed[i] > 0.4) { firstVocal = i; break; }
   }
 
+  // First drop: first sustained plateau at ≥85% of max energy.
+  // Smooths harder to ignore transient spikes (snare flams, crash hits).
+  const dropSmoothed = movingAverage(total, Math.max(16, Math.floor(n / 32)));
+  const dropThreshold = maxV * 0.85;
+  const minPlateauBuckets = Math.max(4, Math.floor(n / 80));
+  let plateauStart = -1, plateauCount = 0;
+  let firstDrop = 0;
+  for (let i = 0; i < n; i++) {
+    if (dropSmoothed[i] >= dropThreshold) {
+      if (plateauCount === 0) plateauStart = i;
+      plateauCount++;
+      if (plateauCount >= minPlateauBuckets) {
+        firstDrop = plateauStart;
+        break;
+      }
+    } else {
+      plateauCount = 0;
+      plateauStart = -1;
+    }
+  }
+
   const bucketSec = durationSec / n;
   return {
     introEndSec: introEnd * bucketSec,
     outroStartSec: Math.max(outroStart * bucketSec, durationSec - 60),
     firstVocalSec: firstVocal * bucketSec,
+    firstDropSec: firstDrop * bucketSec,
   };
 }
 
