@@ -6,6 +6,7 @@ import { detectBpm } from '../engine/beat-engine.js';
 import { library } from '../services/library-manager.js';
 import { sync } from '../engine/sync-engine.js';
 import { clamp } from '../utils/math.js';
+import { smartSync } from '../engine/smart-sync.js';
 
 const idx = (deckId) => (deckId === 'A' ? 0 : 1);
 
@@ -102,6 +103,10 @@ export const actions = {
     const isCurrent = decks.find((d) => d.id === deckId)?.isMaster;
     if (isCurrent) sync.setMaster(null);
     else sync.setMaster(deckId);
+  },
+  // --- Smart Sync (auto-harmonic mixing) ---
+  async smartSync(deckId) {
+    await smartSync.execute(deckId);
   },
   setPadMode(deckId, mode) {
     store.setIn('decks', idx(deckId), { padMode: mode });
