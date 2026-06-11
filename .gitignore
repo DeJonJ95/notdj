@@ -13,3 +13,9 @@ proportfolio-showcase/
 
 # bundled node runtime (not installed system-wide)
 .node/
+
+# wrangler files
+.wrangler
+.dev.vars*
+!.dev.vars.example
+!.env.example
